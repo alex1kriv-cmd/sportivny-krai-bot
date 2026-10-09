@@ -364,7 +364,7 @@ async function rewriteNews(sourceText, env) {
       ? content.trim().slice(0, 3900)
       : null;
   } catch (error) {
-    console.error("OpenAI request failed:", error);
+    console.error("OpenAI request failed:", error); 
     return null;
   }
 }
