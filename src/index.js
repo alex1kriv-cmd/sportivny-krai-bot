@@ -35,7 +35,7 @@ export default {
       return Response.json({
         ok: true,
         cron_status: status || "Cron has not recorded a run yet",
-        checked_channels: CHANNELS.map(channel => channel.username)
+        checked_channels: CHANNELS.map(c => c.username)
       });
     }
 
@@ -55,7 +55,11 @@ export default {
       return Response.json(await tg("setWebhook", {
         url: `${url.origin}/telegram`,
         secret_token: env.TELEGRAM_WEBHOOK_SECRET,
-        allowed_updates: ["message", "channel_post", "callback_query"]
+        allowed_updates: [
+          "message",
+          "channel_post",
+          "callback_query"
+        ]
       }));
     }
 
@@ -88,6 +92,7 @@ export default {
 
     const update = await request.json();
 
+    // Обработка кнопок согласования
     if (update.callback_query) {
       const cb = update.callback_query;
       const msg = cb.message;
@@ -104,6 +109,7 @@ export default {
           text: "Нет доступа к этой операции.",
           show_alert: true
         });
+
         return new Response("OK");
       }
 
@@ -118,9 +124,11 @@ export default {
           text: "Не удалось найти текст черновика.",
           show_alert: true
         });
+
         return new Response("OK");
       }
 
+      // Публикация
       if (cb.data === "publish") {
         await tg("answerCallbackQuery", {
           callback_query_id: cb.id,
@@ -143,72 +151,58 @@ export default {
             });
 
         if (result.ok) {
-          if (photo) {
-            await tg("editMessageCaption", {
-              chat_id: msg.chat.id,
-              message_id: msg.message_id,
-              caption: `✅ Опубликовано в ${TARGET_CHANNEL}\n\n${draft}`.slice(0, 1024),
-              reply_markup: { inline_keyboard: [] }
-            });
-          } else {
-            await tg("editMessageText", {
-              chat_id: msg.chat.id,
-              message_id: msg.message_id,
-              text: `✅ Опубликовано в ${TARGET_CHANNEL}\n\n${draft}`,
-              reply_markup: { inline_keyboard: [] }
-            });
-          }
+          await markDraftMessage(
+            tg,
+            msg,
+            `✅ Опубликовано в ${TARGET_CHANNEL}\n\n${draft}`
+          );
         } else {
           console.error("Publish failed:", result);
+
           await tg("sendMessage", {
             chat_id: msg.chat.id,
-            text: "❌ Не удалось опубликовать. Проверь права бота в канале."
+            text:
+              "❌ Не удалось опубликовать. Проверь права бота " +
+              "в канале и доступность изображения."
           });
         }
 
         return new Response("OK");
       }
 
+      // Отклонение
       if (cb.data === "reject") {
         await tg("answerCallbackQuery", {
           callback_query_id: cb.id,
           text: "Черновик отклонён."
         });
 
-        if (Array.isArray(msg.photo) && msg.photo.length) {
-          await tg("editMessageCaption", {
-            chat_id: msg.chat.id,
-            message_id: msg.message_id,
-            caption: `🚫 Отклонено\n\n${draft}`.slice(0, 1024),
-            reply_markup: { inline_keyboard: [] }
-          });
-        } else {
-          await tg("editMessageText", {
-            chat_id: msg.chat.id,
-            message_id: msg.message_id,
-            text: `🚫 Отклонено\n\n${draft}`,
-            reply_markup: { inline_keyboard: [] }
-          });
-        }
+        await markDraftMessage(
+          tg,
+          msg,
+          `🚫 Отклонено\n\n${draft}`
+        );
 
         return new Response("OK");
       }
 
+      // Переписывание текста
       if (cb.data === "rewrite") {
         await tg("answerCallbackQuery", {
           callback_query_id: cb.id,
           text: "Готовлю новую версию…"
         });
 
-        const original = draft.trim();
-        const rewritten = await rewriteNews(original, env, true);
+        const rewritten = await rewriteNews(draft, env, true);
 
         if (rewritten) {
           await sendDraft(tg, msg.chat.id, rewritten, undefined, env);
         } else {
           await tg("sendMessage", {
             chat_id: msg.chat.id,
-            text: "❌ Не удалось подготовить новую версию. Проверь OpenAI API."
+            text:
+              "❌ Не удалось подготовить новую версию. " +
+              "Проверь OpenAI API."
           });
         }
 
@@ -223,6 +217,7 @@ export default {
       return new Response("OK");
     }
 
+    // Обработка обычных сообщений редактора
     const msg = update.message;
 
     if (!msg?.chat?.id || msg.chat.type !== "private") {
@@ -238,9 +233,10 @@ export default {
         text:
           "🏆 Спортивный край на связи!\n\n" +
           "Пришли текст новости, пересланную публикацию или ссылку. " +
-          "Я перепишу материал и подготовлю черновик с одной картинкой. " +
+          "Я подготовлю редакционный текст и одну картинку. " +
           "В канал публикация попадёт только после твоего подтверждения."
       });
+
       return new Response("OK");
     }
 
@@ -252,6 +248,7 @@ export default {
         chat_id: chatId,
         text: "Этот бот предназначен для редактора канала."
       });
+
       return new Response("OK");
     }
 
@@ -260,12 +257,13 @@ export default {
         chat_id: chatId,
         text: "Пришли текст новости, пересланную публикацию или ссылку."
       });
+
       return new Response("OK");
     }
 
     await tg("sendMessage", {
       chat_id: chatId,
-      text: "⏳ Готовлю текст и картинку…"
+      text: "⏳ Редактирую новость и готовлю изображение…"
     });
 
     const source = await getSourceMaterial(input);
@@ -273,8 +271,11 @@ export default {
     if (!source) {
       await tg("sendMessage", {
         chat_id: chatId,
-        text: "❌ Не удалось прочитать ссылку. Попробуй переслать текст публикации."
+        text:
+          "❌ Не удалось прочитать ссылку. " +
+          "Попробуй переслать текст публикации."
       });
+
       return new Response("OK");
     }
 
@@ -285,10 +286,12 @@ export default {
         chat_id: chatId,
         text: "❌ Не удалось подготовить новость. Проверь OpenAI API."
       });
+
       return new Response("OK");
     }
 
     await sendDraft(tg, chatId, rewritten, msg.message_id, env);
+
     return new Response("OK");
   },
 
@@ -310,6 +313,10 @@ export default {
     );
   }
 };
+
+// ============================================================
+// МОНИТОРИНГ ИСТОЧНИКОВ
+// ============================================================
 
 async function monitorChannels(env) {
   const startedAt = new Date().toISOString();
@@ -337,7 +344,11 @@ async function monitorChannels(env) {
     try {
       result.channels[channel.username] = await scanChannel(channel, env);
     } catch (error) {
-      console.error("CRON_CHANNEL_ERROR", channel.username, String(error));
+      console.error(
+        "CRON_CHANNEL_ERROR",
+        channel.username,
+        String(error)
+      );
 
       result.channels[channel.username] = {
         state: "error",
@@ -347,6 +358,7 @@ async function monitorChannels(env) {
 
     result.last_run = startedAt;
     result.state = "completed";
+
     await env.NEWS_KV.put("monitor:status", JSON.stringify(result));
   }
 
@@ -354,12 +366,15 @@ async function monitorChannels(env) {
 }
 
 async function scanChannel(channel, env) {
-  const response = await fetch(`https://t.me/s/${channel.username}`, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (compatible; SportivnyKraiBot/1.0)"
-    },
-    signal: AbortSignal.timeout(15000)
-  });
+  const response = await fetch(
+    `https://t.me/s/${channel.username}`,
+    {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; SportivnyKraiBot/1.0)"
+      },
+      signal: AbortSignal.timeout(15000)
+    }
+  );
 
   if (!response.ok) {
     throw new Error(`Telegram HTTP ${response.status}`);
@@ -376,8 +391,10 @@ async function scanChannel(channel, env) {
   const savedCursor = await env.NEWS_KV.get(cursorKey);
   const latestId = Math.max(...posts.map(post => post.id));
 
+  // Первый запуск только запоминает последние публикации.
   if (savedCursor === null) {
     await env.NEWS_KV.put(cursorKey, String(latestId));
+
     console.log("CRON_BASELINE", channel.username, latestId);
 
     return {
@@ -389,6 +406,7 @@ async function scanChannel(channel, env) {
   }
 
   const previousId = Number(savedCursor) || 0;
+
   const newPosts = posts
     .filter(post => post.id > previousId)
     .sort((a, b) => a.id - b.id);
@@ -396,6 +414,7 @@ async function scanChannel(channel, env) {
   let draftsSent = 0;
   let highestProcessed = previousId;
 
+  // Не больше пяти новых публикаций за один запуск.
   for (const post of newPosts.slice(0, 5)) {
     const processedKey = `${PREFIX}${channel.username}:${post.id}`;
 
@@ -411,7 +430,9 @@ async function scanChannel(channel, env) {
     }
 
     const sourceText =
-      `${channel.name}\nИсточник: ${post.url}\n\n${post.text}`;
+      `${channel.name}\n` +
+      `Источник: ${post.url}\n\n` +
+      post.text;
 
     const draft = await createMonitoredDraft(sourceText, env);
 
@@ -430,6 +451,7 @@ async function scanChannel(channel, env) {
       }
 
       draftsSent++;
+
       await env.NEWS_KV.put(processedKey, "sent");
     } else {
       await env.NEWS_KV.put(processedKey, "skipped");
@@ -456,8 +478,15 @@ async function scanChannel(channel, env) {
   };
 }
 
+// ============================================================
+// РАЗБОР ПУБЛИКАЦИЙ TELEGRAM
+// ============================================================
+
 function parseTelegramPosts(html, username) {
-  const matches = [...html.matchAll(/data-post=["']([^/"']+)\/(\d+)["']/g)];
+  const matches = [
+    ...html.matchAll(/data-post=["']([^/"']+)\/(\d+)["']/g)
+  ];
+
   const posts = [];
   const seen = new Set();
 
@@ -468,10 +497,12 @@ function parseTelegramPosts(html, username) {
     seen.add(id);
 
     const position = match.index;
+
     const start = html.lastIndexOf(
       '<div class="tgme_widget_message_wrap',
       position
     );
+
     const next = html.indexOf(
       '<div class="tgme_widget_message_wrap',
       position + match[0].length
@@ -487,6 +518,7 @@ function parseTelegramPosts(html, username) {
     );
 
     const text = textMatch ? htmlToText(textMatch[1]) : "";
+
     const timeMatch = block.match(
       /<time[^>]+datetime=["']([^"']+)["']/i
     );
@@ -508,12 +540,35 @@ function parseTelegramPosts(html, username) {
   return posts;
 }
 
+function extractTelegramImage(block) {
+  const patterns = [
+    /<a[^>]+style=["'][^"']*background-image:\s*url\(['"]?([^)'";]+)['"]?\)/i,
+    /<img[^>]+src=["']([^"']+)["']/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = block.match(pattern);
+
+    if (match?.[1] && /^https:\/\//i.test(match[1])) {
+      return match[1].replace(/&amp;/g, "&");
+    }
+  }
+
+  return null;
+}
+
+// ============================================================
+// TELEGRAM API
+// ============================================================
+
 async function telegramApi(env, method, data) {
   const response = await fetch(
     `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json"
+      },
       body: JSON.stringify(data)
     }
   );
@@ -526,6 +581,34 @@ async function telegramApi(env, method, data) {
 
   return result;
 }
+
+async function markDraftMessage(telegram, msg, text) {
+  const isPhoto = Array.isArray(msg.photo) && msg.photo.length > 0;
+
+  if (isPhoto) {
+    return telegram("editMessageCaption", {
+      chat_id: msg.chat.id,
+      message_id: msg.message_id,
+      caption: text.slice(0, 1024),
+      reply_markup: {
+        inline_keyboard: []
+      }
+    });
+  }
+
+  return telegram("editMessageText", {
+    chat_id: msg.chat.id,
+    message_id: msg.message_id,
+    text: text.slice(0, 4000),
+    reply_markup: {
+      inline_keyboard: []
+    }
+  });
+}
+
+// ============================================================
+// ЧЕРНОВИК С ОДНОЙ КАРТИНКОЙ
+// ============================================================
 
 async function sendDraft(
   telegram,
@@ -540,15 +623,26 @@ async function sendDraft(
   const keyboard = {
     inline_keyboard: [
       [
-        { text: "✅ Опубликовать", callback_data: "publish" },
-        { text: "🔄 Переделать", callback_data: "rewrite" }
+        {
+          text: "✅ Опубликовать",
+          callback_data: "publish"
+        },
+        {
+          text: "🔄 Переделать",
+          callback_data: "rewrite"
+        }
       ],
       [
-        { text: "❌ Отклонить", callback_data: "reject" }
+        {
+          text: "❌ Отклонить",
+          callback_data: "reject"
+        }
       ]
     ]
   };
 
+  // Если у исходной публикации есть изображение,
+  // сначала пробуем использовать его.
   if (imageUrl) {
     const result = await telegram("sendPhoto", {
       chat_id: chatId,
@@ -561,56 +655,67 @@ async function sendDraft(
     });
 
     if (result?.ok) return result;
-    console.warn("Source image could not be sent; generating fallback image");
+
+    console.warn(
+      "Could not use source image; trying generated image."
+    );
   }
 
-  if (env?.OPENAI_API_KEY) {
-    try {
-      const imageBase64 = await generateNewsImage(text, env);
+  // Если исходного изображения нет или Telegram его не принял,
+  // создаём тематическую иллюстрацию.
+  try {
+    const imageBase64 = await generateNewsImage(text, env);
 
-      if (imageBase64) {
-        const bytes = Uint8Array.from(
-          atob(imageBase64),
-          character => character.charCodeAt(0)
-        );
+    if (imageBase64) {
+      const bytes = Uint8Array.from(
+        atob(imageBase64),
+        character => character.charCodeAt(0)
+      );
 
-        const form = new FormData();
-        form.append("chat_id", String(chatId));
-        form.append("caption", caption.slice(0, 1024));
-        form.append("reply_markup", JSON.stringify(keyboard));
+      const form = new FormData();
+
+      form.append("chat_id", String(chatId));
+      form.append("caption", caption.slice(0, 1024));
+      form.append("reply_markup", JSON.stringify(keyboard));
+
+      form.append(
+        "photo",
+        new Blob([bytes], { type: "image/png" }),
+        "sportivny-krai.png"
+      );
+
+      if (replyToMessageId) {
         form.append(
-          "photo",
-          new Blob([bytes], { type: "image/png" }),
-          "sportivny-krai.png"
+          "reply_to_message_id",
+          String(replyToMessageId)
         );
-
-        if (replyToMessageId) {
-          form.append("reply_to_message_id", String(replyToMessageId));
-        }
-
-        const response = await fetch(
-          `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`,
-          {
-            method: "POST",
-            body: form
-          }
-        );
-
-        const result = await response.json();
-
-        if (result.ok) return result;
-
-        console.error("Telegram sendPhoto generated image failed", result);
       }
-    } catch (error) {
-      console.error("Image generation/send failed:", String(error));
+
+      const response = await fetch(
+        `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`,
+        {
+          method: "POST",
+          body: form
+        }
+      );
+
+      const result = await response.json();
+
+      if (result.ok) return result;
+
+      console.error("Generated image upload failed:", result);
     }
+  } catch (error) {
+    console.error("Image generation failed:", String(error));
   }
 
+  // Не отправляем обычный черновик без изображения:
+  // пользователь просил один пост — одна картинка.
   return telegram("sendMessage", {
     chat_id: chatId,
     text:
-      "⚠️ Не удалось подготовить картинку. Черновик не отправлен.\n\n" +
+      "⚠️ Не удалось подготовить изображение, поэтому черновик " +
+      "не отправлен.\n\nТекст, который не удалось отправить:\n" +
       text.slice(0, 3500),
     ...(replyToMessageId
       ? { reply_to_message_id: replyToMessageId }
@@ -618,14 +723,21 @@ async function sendDraft(
   });
 }
 
+// ============================================================
+// ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЯ
+// ============================================================
+
 async function generateNewsImage(newsText, env) {
   const prompt =
-    "Create one polished editorial sports-news illustration for a Russian " +
-    "regional sports Telegram channel about Perm Krai. Topic: " +
+    "Create a premium editorial sports image for a Russian regional " +
+    "sports Telegram channel covering Perm Krai. " +
+    "Illustrate the following sports news in a visually compelling, " +
+    "realistic sports-photography style: " +
     newsText.slice(0, 900) +
-    ". Modern premium sports-media art direction, strong composition, " +
-    "realistic sports photography feel. No words, letters, numbers, logos " +
-    "or watermarks. Square 1024x1024 image.";
+    ". Strong composition, professional lighting, restrained color " +
+    "grading, suitable for a serious sports-media publication. " +
+    "Do not include text, letters, numbers, logos, team crests, " +
+    "watermarks, fake headlines or fake scoreboards. Square image.";
 
   const response = await fetch(
     "https://api.openai.com/v1/images/generations",
@@ -651,42 +763,47 @@ async function generateNewsImage(newsText, env) {
       response.status,
       (await response.text()).slice(0, 500)
     );
+
     return null;
   }
 
   const data = await response.json();
+
   return data.data?.[0]?.b64_json || null;
 }
 
-function extractTelegramImage(block) {
-  const patterns = [
-    /<a[^>]+style=["'][^"']*background-image:\s*url\(['"]?([^)'";]+)['"]?\)/i,
-    /<img[^>]+src=["']([^"']+)["']/i
-  ];
-
-  for (const pattern of patterns) {
-    const match = block.match(pattern);
-
-    if (match?.[1] && /^https:\/\//i.test(match[1])) {
-      return match[1].replace(/&amp;/g, "&");
-    }
-  }
-
-  return null;
-}
+// ============================================================
+// АВТОМАТИЧЕСКАЯ РЕДАКТУРА НОВОСТЕЙ
+// ============================================================
 
 async function createMonitoredDraft(sourceText, env) {
-  const systemPrompt = `Ты — редактор Telegram-канала «Спортивный край» о спорте Пермского края.
+  const systemPrompt = `Ты — спортивный журналист и выпускающий редактор Telegram-канала «Спортивный край» о спорте Пермского края.
 
-Пропускай обычную рекламу, розыгрыши, дубли и малозначительные публикации.
-Рассматривай результаты, трансферы, кадровые решения, важные анонсы матчей, рекорды и интересные спортивные истории.
+ОТБОР НОВОСТЕЙ
+Пропускай обычную рекламу, розыгрыши, дубли и малозначительные публикации. Рассматривай результаты, трансферы, кадровые решения, важные анонсы матчей, рекорды и интересные спортивные истории.
 
-Если материал не подходит, ответь ровно SKIP.
-Если подходит, подготовь короткую публикацию на русском языке — обычно 1–3 предложения. Стиль взрослый, живой, конкретный, без канцелярита и мотивационных клише.
-Добавляй ровно два релевантных хэштега в конце: клуб/команда и вид спорта. Например: #АмкарПермь #Футбол, #Молот #Хоккей, #Парма #Баскетбол.
+Если материал не относится к значимым спортивным новостям Пермского края, ответь ровно SKIP.
+
+СТИЛЬ
+Пиши как опытный спортивный журналист для живых людей, а не как нейросеть, которая пересказывает пресс-релиз. Используй естественный современный русский язык. Чередуй короткие и развёрнутые предложения. Меняй структуру и начало публикаций. Начинай с самого интересного подтверждённого факта.
+
+Не начинай автоматически с «стало известно», «команда сообщила», «в рамках очередного тура» или «состоялся матч». Избегай пустых фраз: «подарили болельщикам яркие эмоции», «впереди нас ждёт интересное противостояние», «это ещё раз доказывает», «команда настроена только на победу», «спорт объединяет». Не используй канцелярит, рекламные обороты, искусственный пафос и одинаковые вступления.
+
+СОДЕРЖАНИЕ
+Объясняй, что произошло и почему это может быть важно, но только если вывод подтверждается исходным материалом. Не раздувай простую новость. Не выдумывай интригу, конфликт, причины, последствия или реакцию болельщиков. Если в исходнике нет контекста, не придумывай его.
+
+ТОЧНОСТЬ
+Не выдумывай счёт, статистику, даты, имена, цитаты, травмы, трансферы или турнирное положение. Не выдавай предположения за факты. Сохраняй официальные названия и фактический смысл исходника.
+
+ФОРМАТ
+Обычно 2–4 предложения. Если новость простая, пиши короче. В конце добавляй ровно два релевантных хэштега: команда/клуб и вид спорта.
+Примеры: #АмкарПермь #Футбол, #Молот #Хоккей, #Парма #Баскетбол.
 Не добавляй общие #Пермь и #СпортивныйКрай.
-Не выдумывай факты, счёт, статистику, даты, имена или турнирное положение. Используй только исходный материал.
-Верни только текст публикации или SKIP.`;
+
+ПЕРЕД ОТВЕТОМ
+Убери штампы, повторы, пустые предложения и неподтверждённые выводы. Убедись, что первая фраза сразу сообщает главное, а текст звучит как самостоятельная редакционная публикация.
+
+Верни только готовую публикацию или SKIP.`;
 
   const response = await fetch(
     "https://api.openai.com/v1/chat/completions",
@@ -698,10 +815,16 @@ async function createMonitoredDraft(sourceText, env) {
       },
       body: JSON.stringify({
         model: "gpt-4o-mini",
-        temperature: 0.5,
+        temperature: 0.65,
         messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: sourceText }
+          {
+            role: "system",
+            content: systemPrompt
+          },
+          {
+            role: "user",
+            content: sourceText
+          }
         ]
       })
     }
@@ -725,8 +848,13 @@ async function createMonitoredDraft(sourceText, env) {
     : cleaned.slice(0, 3000);
 }
 
+// ============================================================
+// ПОЛУЧЕНИЕ ИСХОДНОГО МАТЕРИАЛА ПО ССЫЛКЕ
+// ============================================================
+
 async function getSourceMaterial(input) {
   const match = input.match(/https?:\/\/[^\s<>]+/i);
+
   if (!match) return input;
 
   const rawUrl = match[0].replace(/[),.!?]+$/, "");
@@ -738,7 +866,9 @@ async function getSourceMaterial(input) {
     return input;
   }
 
-  if (!["http:", "https:"].includes(url.protocol)) return input;
+  if (!["http:", "https:"].includes(url.protocol)) {
+    return input;
+  }
 
   const host = url.hostname.toLowerCase();
   let fetchUrl = url.href;
@@ -775,7 +905,9 @@ async function getSourceMaterial(input) {
         /class="tgme_widget_message_text[^"]*"[^>]*>([\s\S]*?)<\/div>/i
       );
 
-      if (post) extracted = htmlToText(post[1]);
+      if (post) {
+        extracted = htmlToText(post[1]);
+      }
     }
 
     if (!extracted) {
@@ -798,9 +930,103 @@ async function getSourceMaterial(input) {
     );
   } catch (error) {
     console.error("Source fetch failed:", String(error));
+
     return input.length > rawUrl.length ? input : null;
   }
 }
+
+// ============================================================
+// РУЧНАЯ РЕДАКТУРА НОВОСТЕЙ
+// ============================================================
+
+async function rewriteNews(sourceText, env, isRewrite = false) {
+  const systemPrompt = `Ты — спортивный журналист и выпускающий редактор Telegram-канала «Спортивный край» о спорте Пермского края.
+
+ТВОЯ ЗАДАЧА
+Подготовь самостоятельную редакционную публикацию, а не механический пересказ исходника. Найди главное событие и начни с конкретного факта или детали, которая действительно интересна читателю.
+
+ГОЛОС И СТИЛЬ
+Пиши живым, естественным современным русским языком, как опытный спортивный журналист для обычных читателей. Чередуй короткие и развёрнутые предложения. Меняй структуру публикаций и способ подачи. Допускается сдержанная ирония, если она органична. Не изображай эмоции искусственно.
+
+ИЗБЕГАЙ ШТАМПОВ
+Не начинай без необходимости словами «стало известно», «команда сообщила», «в рамках очередного тура», «состоялся матч». Не используй пустые обороты вроде «подарили болельщикам яркие эмоции», «впереди нас ждёт захватывающее противостояние», «это ещё раз доказывает», «команда продолжает демонстрировать», «спорт объединяет». Не превращай каждую новость в сенсацию. Убирай канцелярит, рекламные формулировки и искусственный пафос.
+
+ФАКТЫ И КОНТЕКСТ
+Сохраняй важные факты исходника. Не придумывай счёт, статистику, даты, имена, цитаты, причины, последствия, травмы, трансферы и турнирное положение. Не выдавай предположения за факты. Не добавляй контекст, которого нет в материале. Не копируй исходные фразы дословно, кроме официальных названий и необходимых цитат.
+
+ОБЪЁМ
+Обычно 2–4 предложения. Простую новость не раздувай, а сложную раскрой настолько, насколько нужно для понимания.
+
+ХЭШТЕГИ
+В конце добавь ровно два релевантных хэштега: команда/клуб и вид спорта.
+Примеры: #АмкарПермь #Футбол, #Молот #Хоккей, #Парма #Баскетбол.
+Не добавляй #Пермь и #СпортивныйКрай.
+
+РЕДАКТОРСКАЯ ПРОВЕРКА
+Перед ответом проверь:
+— первая фраза сразу сообщает главное;
+— текст звучит естественно, а не как пресс-релиз;
+— нет повторов, пустых фраз и штампов;
+— все утверждения подтверждаются исходником;
+— ровно два релевантных хэштега.
+
+${isRewrite
+  ? "Создай действительно альтернативную версию: измени угол подачи, начало и структуру, а не просто замени слова синонимами. Сохрани все факты и не добавляй новых."
+  : "Подготовь интересную, естественную публикацию по исходному материалу, сохранив факты и смысл."}
+
+Верни только готовый текст публикации.`;
+
+  try {
+    const response = await fetch(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model: "gpt-4o-mini",
+          temperature: isRewrite ? 0.8 : 0.65,
+          messages: [
+            {
+              role: "system",
+              content: systemPrompt
+            },
+            {
+              role: "user",
+              content: "Исходный материал:\n\n" + sourceText
+            }
+          ]
+        })
+      }
+    );
+
+    if (!response.ok) {
+      console.error(
+        "OpenAI API error:",
+        response.status,
+        await response.text()
+      );
+
+      return null;
+    }
+
+    const result = await response.json();
+    const content = result.choices?.[0]?.message?.content;
+
+    return typeof content === "string" && content.trim()
+      ? content.trim().slice(0, 3900)
+      : null;
+  } catch (error) {
+    console.error("OpenAI request failed:", String(error));
+    return null;
+  }
+}
+
+// ============================================================
+// ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+// ============================================================
 
 function getMeta(html, property) {
   const escaped = property.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -818,7 +1044,10 @@ function getMeta(html, property) {
 
   for (const pattern of patterns) {
     const result = html.match(pattern);
-    if (result) return htmlToText(result[1]);
+
+    if (result) {
+      return htmlToText(result[1]);
+    }
   }
 
   return "";
@@ -826,6 +1055,7 @@ function getMeta(html, property) {
 
 function getTitle(html) {
   const match = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+
   return match ? htmlToText(match[1]) : "";
 }
 
@@ -845,61 +1075,4 @@ function htmlToText(html) {
     .replace(/[ \t]+/g, " ")
     .replace(/\n\s*\n\s*\n/g, "\n\n")
     .trim();
-}
-
-async function rewriteNews(sourceText, env, isRewrite = false) {
-  const systemPrompt = `Ты — выпускающий редактор Telegram-канала «Спортивный край» о спорте Пермского края.
-Пиши естественно, конкретно и по-русски. Стиль взрослый, живой, без канцелярита, пафоса и мотивационных клише.
-Обычно достаточно 1–3 коротких предложений.
-Добавляй в конце ровно два релевантных хэштега: команда/клуб и вид спорта. Например: #АмкарПермь #Футбол, #Молот #Хоккей, #Парма #Баскетбол.
-Не добавляй общие хэштеги вроде #Пермь или #СпортивныйКрай.
-Не выдумывай факты, результаты, статистику, даты, имена, цитаты и турнирное положение.
-Не выдавай предположения за подтверждённую информацию.
-${isRewrite
-  ? "Создай альтернативную версию, изменив структуру и формулировки, сохранив факты."
-  : "Подготовь публикацию по исходному материалу, сохранив факты и смысл."}
-Верни только готовый текст публикации.`;
-
-  try {
-    const response = await fetch(
-      "https://api.openai.com/v1/chat/completions",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${env.OPENAI_API_KEY}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          model: "gpt-4o-mini",
-          temperature: isRewrite ? 0.8 : 0.5,
-          messages: [
-            { role: "system", content: systemPrompt },
-            {
-              role: "user",
-              content: "Исходный материал:\n\n" + sourceText
-            }
-          ]
-        })
-      }
-    );
-
-    if (!response.ok) {
-      console.error(
-        "OpenAI API error:",
-        response.status,
-        await response.text()
-      );
-      return null;
-    }
-
-    const result = await response.json();
-    const content = result.choices?.[0]?.message?.content;
-
-    return typeof content === "string" && content.trim()
-      ? content.trim().slice(0, 3900)
-      : null;
-  } catch (error) {
-    console.error("OpenAI request failed:", String(error));
-    return null;
-  }
 }
