@@ -2,3 +2,25 @@
 name = "sportivny-krai-bot"
 main = "src/index.js"
 compatibility_date = "2026-10-09"
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+invocation_logs = true
+persist = true
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 1
+persist = true
+
+[[kv_namespaces]]
+binding = "NEWS_KV"
+id = "d61c3086490449d09ddc00653cc6082"
+
+[triggers]
+crons = ["*/15 * * * *"]
