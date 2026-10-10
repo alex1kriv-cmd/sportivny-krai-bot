@@ -6,6 +6,7 @@ compatibility_date = "2026-10-09"
 [observability]
 enabled = true
 head_sampling_rate = 1
+redact_query_string = false
 
 [observability.logs]
 enabled = true
@@ -20,7 +21,7 @@ persist = true
 
 [[kv_namespaces]]
 binding = "NEWS_KV"
-id = "d61c3086490449d09ddc00653cc6082"
+id = "d61c3086490449d09ddc600653cc6082"
 
 [triggers]
 crons = ["*/15 * * * *"]
