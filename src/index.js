@@ -728,16 +728,48 @@ async function sendDraft(
 // ============================================================
 
 async function generateNewsImage(newsText, env) {
-  const prompt =
-    "Create a premium editorial sports image for a Russian regional " +
-    "sports Telegram channel covering Perm Krai. " +
-    "Illustrate the following sports news in a visually compelling, " +
-    "realistic sports-photography style: " +
-    newsText.slice(0, 900) +
-    ". Strong composition, professional lighting, restrained color " +
-    "grading, suitable for a serious sports-media publication. " +
-    "Do not include text, letters, numbers, logos, team crests, " +
-    "watermarks, fake headlines or fake scoreboards. Square image.";
+  // Единый визуальный стиль «Спортивного края»:
+  // графитовый фон, белые детали и яркий лаймово-зелёный акцент.
+  // Генерируем только предметную спортивную иллюстрацию — без людей,
+  // формы клубов, эмблем и выдуманных табло. Текст и счёт добавляются
+  // отдельно только в специальных программных карточках результатов.
+  const text = String(newsText || "").toLowerCase();
+
+  let subject = "a single sports object related to the news";
+
+  if (/баскетбол|баскетболь|парма|basketball/i.test(text)) {
+    subject = "an orange basketball and a subtle hardwood-court texture";
+  } else if (/хоккей|молот|шайб|вхл|hockey/i.test(text)) {
+    subject = "a hockey puck and stick on textured ice";
+  } else if (/футбол|амкар|мяч|football|soccer/i.test(text)) {
+    subject = "a football on a subtle stadium-pitch texture";
+  } else if (/волейбол|волейболь|volleyball/i.test(text)) {
+    subject = "a volleyball with a subtle indoor-court texture";
+  } else if (/бег|легк|марафон|athletics|running/i.test(text)) {
+    subject = "running track lanes and a single starting-line detail";
+  } else if (/плаван|swimming/i.test(text)) {
+    subject = "ripples on a swimming pool with lane markings";
+  }
+
+  const prompt = `Create one square editorial sports illustration for the Russian regional sports news brand «Спортивный край».
+
+STRICT, CONSISTENT BRAND ART DIRECTION — follow exactly for every image:
+- Background: deep graphite / near-black (#111719), with a subtle matte texture.
+- Accent: one restrained electric lime-green (#B7F34A) diagonal light streak or geometric accent near the edge.
+- Secondary colors: white, cool grey, and the natural color of the sports object only.
+- Composition: clean, premium, minimal, dramatic studio lighting; one clear focal object, generous dark negative space, subtle grain, crisp silhouette.
+- Make it look like a designed editorial cover from the same publication every time, not a random photograph.
+
+SUBJECT for this image: ${subject}.
+
+IMPORTANT RESTRICTIONS:
+- NO people, NO athletes, NO faces, NO hands, NO bodies, NO silhouettes.
+- NO jerseys, uniforms, player numbers, team names, club crests, logos, flags or sponsor marks.
+- NO text, letters, numbers, typography, watermarks, fake headlines, scoreboards or invented scores.
+- Do not invent an actual match scene or imply that this is a real photograph from a game.
+- Do not include several unrelated sports or objects.
+
+The result must have the same graphite-and-lime visual identity as every other «Спортивный край» image. Square 1024x1024 composition.`;
 
   const response = await fetch(
     "https://api.openai.com/v1/images/generations",
