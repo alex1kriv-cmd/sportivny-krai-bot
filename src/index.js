@@ -619,189 +619,52 @@ async function sendDraft(
   imageUrl
 ) {
   const caption = DRAFT_MARKER + text;
-
   const keyboard = {
     inline_keyboard: [
       [
-        {
-          text: "✅ Опубликовать",
-          callback_data: "publish"
-        },
-        {
-          text: "🔄 Переделать",
-          callback_data: "rewrite"
-        }
+        { text: "✅ Опубликовать", callback_data: "publish" },
+        { text: "🔄 Переделать", callback_data: "rewrite" }
       ],
-      [
-        {
-          text: "❌ Отклонить",
-          callback_data: "reject"
-        }
-      ]
+      [{ text: "❌ Отклонить", callback_data: "reject" }]
     ]
   };
 
-  // Если у исходной публикации есть изображение,
-  // сначала пробуем использовать его.
-  if (imageUrl) {
-    const result = await telegram("sendPhoto", {
-      chat_id: chatId,
-      photo: imageUrl,
-      caption: caption.slice(0, 1024),
-      reply_markup: keyboard,
-      ...(replyToMessageId
-        ? { reply_to_message_id: replyToMessageId }
-        : {})
-    });
+  // Всегда используем постоянный баннер клуба, без генерации изображений.
+  const bannerUrl = getClubBannerUrl(text);
+  const result = await telegram("sendPhoto", {
+    chat_id: chatId,
+    photo: bannerUrl,
+    caption: caption.slice(0, 1024),
+    reply_markup: keyboard,
+    ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {})
+  });
 
-    if (result?.ok) return result;
+  if (result?.ok) return result;
 
-    console.warn(
-      "Could not use source image; trying generated image."
-    );
-  }
-
-  // Если исходного изображения нет или Telegram его не принял,
-  // создаём тематическую иллюстрацию.
-  try {
-    const imageBase64 = await generateNewsImage(text, env);
-
-    if (imageBase64) {
-      const bytes = Uint8Array.from(
-        atob(imageBase64),
-        character => character.charCodeAt(0)
-      );
-
-      const form = new FormData();
-
-      form.append("chat_id", String(chatId));
-      form.append("caption", caption.slice(0, 1024));
-      form.append("reply_markup", JSON.stringify(keyboard));
-
-      form.append(
-        "photo",
-        new Blob([bytes], { type: "image/png" }),
-        "sportivny-krai.png"
-      );
-
-      if (replyToMessageId) {
-        form.append(
-          "reply_to_message_id",
-          String(replyToMessageId)
-        );
-      }
-
-      const response = await fetch(
-        `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendPhoto`,
-        {
-          method: "POST",
-          body: form
-        }
-      );
-
-      const result = await response.json();
-
-      if (result.ok) return result;
-
-      console.error("Generated image upload failed:", result);
-    }
-  } catch (error) {
-    console.error("Image generation failed:", String(error));
-  }
-
-  // Не отправляем обычный черновик без изображения:
-  // пользователь просил один пост — одна картинка.
+  console.error("Could not send club banner:", result);
   return telegram("sendMessage", {
     chat_id: chatId,
     text:
-      "⚠️ Не удалось подготовить изображение, поэтому черновик " +
-      "не отправлен.\n\nТекст, который не удалось отправить:\n" +
+      "⚠️ Не удалось отправить постоянный баннер. Проверь, что файлы " +
+      "assets/molot.png, assets/parma.png и assets/amkar.png загружены в GitHub.\n\n" +
       text.slice(0, 3500),
-    ...(replyToMessageId
-      ? { reply_to_message_id: replyToMessageId }
-      : {})
+    ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {})
   });
 }
 
-// ============================================================
-// ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЯ
-// ============================================================
+function getClubBannerUrl(text) {
+  const value = String(text || "").toLowerCase();
+  const base = "https://raw.githubusercontent.com/alex1kriv-cmd/sportivny-krai-bot/main/assets/";
 
-async function generateNewsImage(newsText, env) {
-  // Единый визуальный стиль «Спортивного края»:
-  // графитовый фон, белые детали и яркий лаймово-зелёный акцент.
-  // Генерируем только предметную спортивную иллюстрацию — без людей,
-  // формы клубов, эмблем и выдуманных табло. Текст и счёт добавляются
-  // отдельно только в специальных программных карточках результатов.
-  const text = String(newsText || "").toLowerCase();
-
-  let subject = "a single sports object related to the news";
-
-  if (/баскетбол|баскетболь|парма|basketball/i.test(text)) {
-    subject = "an orange basketball and a subtle hardwood-court texture";
-  } else if (/хоккей|молот|шайб|вхл|hockey/i.test(text)) {
-    subject = "a hockey puck and stick on textured ice";
-  } else if (/футбол|амкар|мяч|football|soccer/i.test(text)) {
-    subject = "a football on a subtle stadium-pitch texture";
-  } else if (/волейбол|волейболь|volleyball/i.test(text)) {
-    subject = "a volleyball with a subtle indoor-court texture";
-  } else if (/бег|легк|марафон|athletics|running/i.test(text)) {
-    subject = "running track lanes and a single starting-line detail";
-  } else if (/плаван|swimming/i.test(text)) {
-    subject = "ripples on a swimming pool with lane markings";
+  if (/парма|баскетбол|баскетболь|basketball/.test(value)) {
+    return base + "parma.png";
   }
 
-  const prompt = `Create one square editorial sports illustration for the Russian regional sports news brand «Спортивный край».
-
-STRICT, CONSISTENT BRAND ART DIRECTION — follow exactly for every image:
-- Background: deep graphite / near-black (#111719), with a subtle matte texture.
-- Accent: one restrained electric lime-green (#B7F34A) diagonal light streak or geometric accent near the edge.
-- Secondary colors: white, cool grey, and the natural color of the sports object only.
-- Composition: clean, premium, minimal, dramatic studio lighting; one clear focal object, generous dark negative space, subtle grain, crisp silhouette.
-- Make it look like a designed editorial cover from the same publication every time, not a random photograph.
-
-SUBJECT for this image: ${subject}.
-
-IMPORTANT RESTRICTIONS:
-- NO people, NO athletes, NO faces, NO hands, NO bodies, NO silhouettes.
-- NO jerseys, uniforms, player numbers, team names, club crests, logos, flags or sponsor marks.
-- NO text, letters, numbers, typography, watermarks, fake headlines, scoreboards or invented scores.
-- Do not invent an actual match scene or imply that this is a real photograph from a game.
-- Do not include several unrelated sports or objects.
-
-The result must have the same graphite-and-lime visual identity as every other «Спортивный край» image. Square 1024x1024 composition.`;
-
-  const response = await fetch(
-    "https://api.openai.com/v1/images/generations",
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        model: "gpt-image-1-mini",
-        prompt,
-        size: "1024x1024",
-        quality: "low",
-        output_format: "png"
-      })
-    }
-  );
-
-  if (!response.ok) {
-    console.error(
-      "OpenAI image API error:",
-      response.status,
-      (await response.text()).slice(0, 500)
-    );
-
-    return null;
+  if (/амкар|футбол|футболь|soccer|football/.test(value)) {
+    return base + "amkar.png";
   }
 
-  const data = await response.json();
-
-  return data.data?.[0]?.b64_json || null;
+  return base + "molot.png";
 }
 
 // ============================================================
@@ -811,31 +674,22 @@ The result must have the same graphite-and-lime visual identity as every other �
 async function createMonitoredDraft(sourceText, env) {
   const systemPrompt = `Ты — спортивный журналист и выпускающий редактор Telegram-канала «Спортивный край» о спорте Пермского края.
 
-ОТБОР НОВОСТЕЙ
-Пропускай обычную рекламу, розыгрыши, дубли и малозначительные публикации. Рассматривай результаты, трансферы, кадровые решения, важные анонсы матчей, рекорды и интересные спортивные истории.
-
-Если материал не относится к значимым спортивным новостям Пермского края, ответь ровно SKIP.
+ОТБОР
+Пропускай рекламу, розыгрыши, дубли и малозначительные публикации. Рассматривай важные результаты, трансферы, кадровые решения, анонсы матчей, рекорды и интересные спортивные истории. Если материал не относится к значимым спортивным новостям Пермского края, ответь ровно SKIP.
 
 СТИЛЬ
-Пиши как опытный спортивный журналист для живых людей, а не как нейросеть, которая пересказывает пресс-релиз. Используй естественный современный русский язык. Чередуй короткие и развёрнутые предложения. Меняй структуру и начало публикаций. Начинай с самого интересного подтверждённого факта.
+Пиши живо, естественно и по-человечески, как опытный спортивный журналист. Не пересказывай пресс-релиз канцелярским языком. Начинай с главного факта. Меняй начало и структуру от публикации к публикации. Не используй штампы, пустой пафос, искусственную интригу и фразы вроде «подарили яркие эмоции», «впереди нас ждёт захватывающее противостояние», «это ещё раз доказывает».
 
-Не начинай автоматически с «стало известно», «команда сообщила», «в рамках очередного тура» или «состоялся матч». Избегай пустых фраз: «подарили болельщикам яркие эмоции», «впереди нас ждёт интересное противостояние», «это ещё раз доказывает», «команда настроена только на победу», «спорт объединяет». Не используй канцелярит, рекламные обороты, искусственный пафос и одинаковые вступления.
-
-СОДЕРЖАНИЕ
-Объясняй, что произошло и почему это может быть важно, но только если вывод подтверждается исходным материалом. Не раздувай простую новость. Не выдумывай интригу, конфликт, причины, последствия или реакцию болельщиков. Если в исходнике нет контекста, не придумывай его.
+СТРУКТУРА TELEGRAM
+Сделай короткий заголовок с одним подходящим эмодзи в первой строке. Затем оставь пустую строку и напиши 2–3 коротких абзаца. Каждый абзац — обычно 1–2 предложения. Добавь ещё 1 уместный эмодзи, только если он помогает передать тему; не ставь эмодзи в каждом предложении. Используй естественные переносы строк, чтобы текст не выглядел сплошной стеной.
 
 ТОЧНОСТЬ
-Не выдумывай счёт, статистику, даты, имена, цитаты, травмы, трансферы или турнирное положение. Не выдавай предположения за факты. Сохраняй официальные названия и фактический смысл исходника.
+Не выдумывай счёт, статистику, даты, имена, цитаты, травмы, трансферы, причины, последствия или турнирное положение. Не добавляй прогнозы и эмоции, которых нет в исходнике. Если данных мало, пиши коротко, не заполняй объём догадками.
 
-ФОРМАТ
-Обычно 2–4 предложения. Если новость простая, пиши короче. В конце добавляй ровно два релевантных хэштега: команда/клуб и вид спорта.
-Примеры: #АмкарПермь #Футбол, #Молот #Хоккей, #Парма #Баскетбол.
-Не добавляй общие #Пермь и #СпортивныйКрай.
+ХЭШТЕГИ
+В конце добавь ровно два тематических хэштега: клуб/команда и вид спорта. Например: #Молот #Хоккей, #Парма #Баскетбол, #АмкарПермь #Футбол. Перед хэштегами оставь пустую строку. Не добавляй #Пермь и #СпортивныйКрай.
 
-ПЕРЕД ОТВЕТОМ
-Убери штампы, повторы, пустые предложения и неподтверждённые выводы. Убедись, что первая фраза сразу сообщает главное, а текст звучит как самостоятельная редакционная публикация.
-
-Верни только готовую публикацию или SKIP.`;
+Верни только готовую публикацию или SKIP. Сохраняй абзацы и переносы строк.`;
 
   const response = await fetch(
     "https://api.openai.com/v1/chat/completions",
@@ -974,39 +828,26 @@ async function getSourceMaterial(input) {
 async function rewriteNews(sourceText, env, isRewrite = false) {
   const systemPrompt = `Ты — спортивный журналист и выпускающий редактор Telegram-канала «Спортивный край» о спорте Пермского края.
 
-ТВОЯ ЗАДАЧА
-Подготовь самостоятельную редакционную публикацию, а не механический пересказ исходника. Найди главное событие и начни с конкретного факта или детали, которая действительно интересна читателю.
+ЗАДАЧА И СТИЛЬ
+Подготовь самостоятельную редакционную публикацию, а не механический пересказ. Пиши живым современным русским языком, как опытный спортивный журналист для обычных читателей. Начинай с самого интересного подтверждённого факта. Меняй угол подачи и структуру, не используй одинаковые вступления.
 
-ГОЛОС И СТИЛЬ
-Пиши живым, естественным современным русским языком, как опытный спортивный журналист для обычных читателей. Чередуй короткие и развёрнутые предложения. Меняй структуру публикаций и способ подачи. Допускается сдержанная ирония, если она органична. Не изображай эмоции искусственно.
+ФОРМАТ TELEGRAM
+Первая строка — короткий заголовок с одним уместным эмодзи. После заголовка пустая строка. Далее 2–3 коротких абзаца, обычно по 1–2 предложения. Разделяй абзацы пустой строкой. Используй ещё 1 уместный эмодзи, если это подходит по смыслу, но не превращай текст в набор значков. Не пиши весь материал одним абзацем. Простую новость не раздувай.
 
 ИЗБЕГАЙ ШТАМПОВ
-Не начинай без необходимости словами «стало известно», «команда сообщила», «в рамках очередного тура», «состоялся матч». Не используй пустые обороты вроде «подарили болельщикам яркие эмоции», «впереди нас ждёт захватывающее противостояние», «это ещё раз доказывает», «команда продолжает демонстрировать», «спорт объединяет». Не превращай каждую новость в сенсацию. Убирай канцелярит, рекламные формулировки и искусственный пафос.
+Не начинай автоматически с «стало известно», «команда сообщила», «в рамках очередного тура», «состоялся матч». Не используй пустые обороты вроде «подарили болельщикам яркие эмоции», «впереди нас ждёт захватывающее противостояние», «это ещё раз доказывает», «спорт объединяет». Без канцелярита, искусственного пафоса и выдуманной интриги.
 
-ФАКТЫ И КОНТЕКСТ
-Сохраняй важные факты исходника. Не придумывай счёт, статистику, даты, имена, цитаты, причины, последствия, травмы, трансферы и турнирное положение. Не выдавай предположения за факты. Не добавляй контекст, которого нет в материале. Не копируй исходные фразы дословно, кроме официальных названий и необходимых цитат.
-
-ОБЪЁМ
-Обычно 2–4 предложения. Простую новость не раздувай, а сложную раскрой настолько, насколько нужно для понимания.
+ФАКТЫ
+Сохраняй важные факты исходника. Не придумывай счёт, статистику, даты, имена, цитаты, причины, последствия, травмы, трансферы и турнирное положение. Не выдавай предположения за факты. Не добавляй сведения, которых нет в источнике. Не копируй исходные фразы дословно, кроме официальных названий и необходимых цитат.
 
 ХЭШТЕГИ
-В конце добавь ровно два релевантных хэштега: команда/клуб и вид спорта.
-Примеры: #АмкарПермь #Футбол, #Молот #Хоккей, #Парма #Баскетбол.
-Не добавляй #Пермь и #СпортивныйКрай.
-
-РЕДАКТОРСКАЯ ПРОВЕРКА
-Перед ответом проверь:
-— первая фраза сразу сообщает главное;
-— текст звучит естественно, а не как пресс-релиз;
-— нет повторов, пустых фраз и штампов;
-— все утверждения подтверждаются исходником;
-— ровно два релевантных хэштега.
+В конце добавь ровно два релевантных хэштега: клуб/команда и вид спорта. Например: #Молот #Хоккей, #Парма #Баскетбол, #АмкарПермь #Футбол. Перед хэштегами оставь пустую строку. Не добавляй #Пермь и #СпортивныйКрай.
 
 ${isRewrite
-  ? "Создай действительно альтернативную версию: измени угол подачи, начало и структуру, а не просто замени слова синонимами. Сохрани все факты и не добавляй новых."
-  : "Подготовь интересную, естественную публикацию по исходному материалу, сохранив факты и смысл."}
+  ? "Создай действительно альтернативную версию: измени начало, угол подачи и структуру, сохранив все факты."
+  : "Подготовь живую и ясную публикацию, сохранив факты и смысл исходника."}
 
-Верни только готовый текст публикации.`;
+Верни только готовый текст. Обязательно сохрани абзацы и переносы строк.`;
 
   try {
     const response = await fetch(
