@@ -375,13 +375,28 @@ async function monitorOfficialBasketballResults(env) {
         scoreA < 0 || scoreB < 0 || scoreA > 200 || scoreB > 200 ||
         (scoreA === 0 && scoreB === 0)) continue;
 
-    // Record non-Parma result pages as checked only after the team check above.
-    // The page order on RussiaBasket is home team, status, home score, away score,
-    // away team. We intentionally avoid inferring the opponent from noisy markup.
+    // Determine Parma's side from the official match-card order. If the card
+    // does not clearly place Parma before or after the score pair, do not publish.
+    const statusIndex = text.search(/(?:Завершена|Матч заверш[её]н|Игра завершена)/i);
+    const parmaIndex = text.search(/БЕТСИТИ\s+ПАРМА|ПАРМА\s+Пермский край/i);
+    const scoreIndex = text.indexOf(scoreMatch[0], statusIndex);
+    let parmaScore;
+    let opponentScore;
+    if (parmaIndex >= 0 && parmaIndex < statusIndex) {
+      parmaScore = scoreA;
+      opponentScore = scoreB;
+    } else if (parmaIndex > scoreIndex && scoreIndex >= 0) {
+      parmaScore = scoreB;
+      opponentScore = scoreA;
+    } else {
+      console.log("RUSSIABASKET_UNCLEAR_TEAM_ORDER", id);
+      continue;
+    }
+
     const post = [
       "🏀 «ПАРМА»: результат матча",
       "",
-      `Итоговый счёт по данным РФБ: ${scoreA}:${scoreB}.`,
+      `Матч завершён. Счёт «ПАРМЫ»: ${parmaScore}:${opponentScore}.`,
       "",
       `Источник: ${gameUrl}`,
       "",
