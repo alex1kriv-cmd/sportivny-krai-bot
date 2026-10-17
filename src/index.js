@@ -1,8 +1,13 @@
+
 const CHANNELS = [
   { name: "ХК «Молот»", username: "hcmolotperm" },
   { name: "БК «ПАРМА»", username: "parmabasketprm" },
   { name: "ФК «Амкар Пермь»", username: "amkarprm" },
-  { name: "ГК «Пермские медведи»", username: "permmedvedi", type: "handball" }
+  {
+    name: "ГК «Пермские медведи»",
+    username: "permmedvedi",
+    type: "handball"
+  }
 ];
 
 const PREFIX = "telegram-source:";
@@ -31,11 +36,9 @@ export default {
         );
       }
 
-      const status = await env.NEWS_KV.get("monitor:status", "json");
-
       return Response.json({
         ok: true,
-        cron_status: status || "Cron has not recorded a run yet",
+        cron_status: await env.NEWS_KV.get("monitor:status", "json"),
         checked_channels: CHANNELS.map(c => c.username)
       });
     }
@@ -56,11 +59,7 @@ export default {
       return Response.json(await tg("setWebhook", {
         url: `${url.origin}/telegram`,
         secret_token: env.TELEGRAM_WEBHOOK_SECRET,
-        allowed_updates: [
-          "message",
-          "channel_post",
-          "callback_query"
-        ]
+        allowed_updates: ["message", "channel_post", "callback_query"]
       }));
     }
 
@@ -80,7 +79,6 @@ export default {
     }
 
     if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_WEBHOOK_SECRET) {
-      console.error("Webhook configuration incomplete");
       return new Response("Configuration error", { status: 500 });
     }
 
@@ -93,7 +91,6 @@ export default {
 
     const update = await request.json();
 
-    // Обработка кнопок согласования
     if (update.callback_query) {
       const cb = update.callback_query;
       const msg = cb.message;
@@ -110,7 +107,6 @@ export default {
           text: "Нет доступа к этой операции.",
           show_alert: true
         });
-
         return new Response("OK");
       }
 
@@ -125,11 +121,9 @@ export default {
           text: "Не удалось найти текст черновика.",
           show_alert: true
         });
-
         return new Response("OK");
       }
 
-      // Публикация вручную подготовленного черновика
       if (cb.data === "publish") {
         await tg("answerCallbackQuery", {
           callback_query_id: cb.id,
@@ -140,54 +134,44 @@ export default {
           ? msg.photo[msg.photo.length - 1].file_id
           : null;
 
+        const publication = `${draft}\n\n🤖 Автоматическая новость`;
+
         const result = photo
           ? await tg("sendPhoto", {
               chat_id: TARGET_CHANNEL,
               photo,
-              caption: draft.slice(0, 1024)
+              caption: publication.slice(0, 1024)
             })
           : await tg("sendMessage", {
               chat_id: TARGET_CHANNEL,
-              text: draft
+              text: publication.slice(0, 4000)
             });
 
         if (result.ok) {
           await markDraftMessage(
-            tg,
-            msg,
+            tg, msg,
             `✅ Опубликовано в ${TARGET_CHANNEL}\n\n${draft}`
           );
         } else {
-          console.error("Publish failed:", result);
-
           await tg("sendMessage", {
             chat_id: msg.chat.id,
-            text:
-              "❌ Не удалось опубликовать. Проверь права бота " +
-              "в канале и доступность изображения."
+            text: "❌ Не удалось опубликовать. Проверь права бота в канале."
           });
         }
 
         return new Response("OK");
       }
 
-      // Отклонение
       if (cb.data === "reject") {
         await tg("answerCallbackQuery", {
           callback_query_id: cb.id,
           text: "Черновик отклонён."
         });
 
-        await markDraftMessage(
-          tg,
-          msg,
-          `🚫 Отклонено\n\n${draft}`
-        );
-
+        await markDraftMessage(tg, msg, `🚫 Отклонено\n\n${draft}`);
         return new Response("OK");
       }
 
-      // Переписывание текста
       if (cb.data === "rewrite") {
         await tg("answerCallbackQuery", {
           callback_query_id: cb.id,
@@ -201,9 +185,7 @@ export default {
         } else {
           await tg("sendMessage", {
             chat_id: msg.chat.id,
-            text:
-              "❌ Не удалось подготовить новую версию. " +
-              "Проверь OpenAI API."
+            text: "❌ Не удалось подготовить новую версию. Проверь OpenAI API."
           });
         }
 
@@ -218,7 +200,6 @@ export default {
       return new Response("OK");
     }
 
-    // Обработка обычных сообщений редактора
     const msg = update.message;
 
     if (!msg?.chat?.id || msg.chat.type !== "private") {
@@ -234,10 +215,9 @@ export default {
         text:
           "🏆 Спортивный край на связи!\n\n" +
           "Пришли текст новости, пересланную публикацию или ссылку. " +
-          "Я подготовлю редакционный текст и одну картинку. " +
-          "В канал публикация попадёт только после твоего подтверждения."
+          "Я подготовлю редакционный текст и картинку. " +
+          "Ручные публикации отправляются после твоего подтверждения."
       });
-
       return new Response("OK");
     }
 
@@ -249,7 +229,6 @@ export default {
         chat_id: chatId,
         text: "Этот бот предназначен для редактора канала."
       });
-
       return new Response("OK");
     }
 
@@ -258,7 +237,6 @@ export default {
         chat_id: chatId,
         text: "Пришли текст новости, пересланную публикацию или ссылку."
       });
-
       return new Response("OK");
     }
 
@@ -272,11 +250,8 @@ export default {
     if (!source) {
       await tg("sendMessage", {
         chat_id: chatId,
-        text:
-          "❌ Не удалось прочитать ссылку. " +
-          "Попробуй переслать текст публикации."
+        text: "❌ Не удалось прочитать ссылку. Попробуй переслать текст публикации."
       });
-
       return new Response("OK");
     }
 
@@ -287,12 +262,10 @@ export default {
         chat_id: chatId,
         text: "❌ Не удалось подготовить новость. Проверь OpenAI API."
       });
-
       return new Response("OK");
     }
 
     await sendDraft(tg, chatId, rewritten, msg.message_id, env);
-
     return new Response("OK");
   },
 
@@ -345,12 +318,7 @@ async function monitorChannels(env) {
     try {
       result.channels[channel.username] = await scanChannel(channel, env);
     } catch (error) {
-      console.error(
-        "CRON_CHANNEL_ERROR",
-        channel.username,
-        String(error)
-      );
-
+      console.error("CRON_CHANNEL_ERROR", channel.username, String(error));
       result.channels[channel.username] = {
         state: "error",
         error: String(error).slice(0, 300)
@@ -359,7 +327,6 @@ async function monitorChannels(env) {
 
     result.last_run = startedAt;
     result.state = "completed";
-
     await env.NEWS_KV.put("monitor:status", JSON.stringify(result));
   }
 
@@ -367,15 +334,12 @@ async function monitorChannels(env) {
 }
 
 async function scanChannel(channel, env) {
-  const response = await fetch(
-    `https://t.me/s/${channel.username}`,
-    {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; SportivnyKraiBot/1.0)"
-      },
-      signal: AbortSignal.timeout(15000)
-    }
-  );
+  const response = await fetch(`https://t.me/s/${channel.username}`, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 (compatible; SportivnyKraiBot/1.0)"
+    },
+    signal: AbortSignal.timeout(15000)
+  });
 
   if (!response.ok) {
     throw new Error(`Telegram HTTP ${response.status}`);
@@ -392,30 +356,26 @@ async function scanChannel(channel, env) {
   const savedCursor = await env.NEWS_KV.get(cursorKey);
   const latestId = Math.max(...posts.map(post => post.id));
 
-  // Первый запуск только запоминает последние публикации.
   if (savedCursor === null) {
     await env.NEWS_KV.put(cursorKey, String(latestId));
-
     console.log("CRON_BASELINE", channel.username, latestId);
 
     return {
       state: "baseline",
       posts_found: posts.length,
       latest_id: latestId,
-      drafts_sent: 0
+      published: 0
     };
   }
 
   const previousId = Number(savedCursor) || 0;
-
   const newPosts = posts
     .filter(post => post.id > previousId)
     .sort((a, b) => a.id - b.id);
 
-  let draftsSent = 0;
+  let published = 0;
   let highestProcessed = previousId;
 
-  // Не больше пяти новых публикаций за один запуск.
   for (const post of newPosts.slice(0, 5)) {
     const processedKey = `${PREFIX}${channel.username}:${post.id}`;
 
@@ -431,43 +391,43 @@ async function scanChannel(channel, env) {
     }
 
     const sourceText =
-      `${channel.name}\n` +
-      `Источник: ${post.url}\n\n` +
-      post.text;
+      `${channel.name}\nИсточник: ${post.url}\n\n${post.text}`;
 
     const draft = await createMonitoredDraft(sourceText, env, channel);
 
-    if (draft !== "SKIP") {
-      const telegram = (method, data) => telegramApi(env, method, data);
-      const publication =
-        `${draft}\n\nИсточник: ${post.url}\n\n🤖 Автоматическая новость`;
-      const bannerUrl = getClubBannerUrl(`${channel.name}\n${sourceText}`);
-
-      let sent = await telegram("sendPhoto", {
-        chat_id: TARGET_CHANNEL,
-        photo: bannerUrl,
-        caption: publication.slice(0, 1024)
-      });
-
-      if (!sent?.ok) {
-        console.error("Automatic photo post failed; trying text:", sent);
-        sent = await telegram("sendMessage", {
-          chat_id: TARGET_CHANNEL,
-          text: publication.slice(0, 4000),
-          disable_web_page_preview: false
-        });
-      }
-
-      if (!sent?.ok) {
-        throw new Error(`Could not automatically publish ${post.url}`);
-      }
-
-      draftsSent++;
-      await env.NEWS_KV.put(processedKey, "published");
-    } else {
+    if (draft === "SKIP") {
       await env.NEWS_KV.put(processedKey, "skipped");
+      highestProcessed = Math.max(highestProcessed, post.id);
+      continue;
     }
 
+    const publication =
+      `${draft}\n\nИсточник: ${post.url}\n\n🤖 Автоматическая новость`;
+
+    const bannerUrl = getClubBannerUrl(`${channel.name}\n${sourceText}`);
+    const telegram = (method, data) => telegramApi(env, method, data);
+
+    let sent = await telegram("sendPhoto", {
+      chat_id: TARGET_CHANNEL,
+      photo: bannerUrl,
+      caption: publication.slice(0, 1024)
+    });
+
+    if (!sent?.ok) {
+      console.error("Photo publication failed:", sent);
+
+      sent = await telegram("sendMessage", {
+        chat_id: TARGET_CHANNEL,
+        text: publication.slice(0, 4000)
+      });
+    }
+
+    if (!sent?.ok) {
+      throw new Error(`Could not publish ${post.url}`);
+    }
+
+    published++;
+    await env.NEWS_KV.put(processedKey, "published");
     highestProcessed = Math.max(highestProcessed, post.id);
   }
 
@@ -478,42 +438,36 @@ async function scanChannel(channel, env) {
   console.log("CRON_CHANNEL_DONE", channel.username, {
     posts_found: posts.length,
     new_posts: newPosts.length,
-    drafts_sent: draftsSent
+    published
   });
 
   return {
     state: "ok",
     posts_found: posts.length,
     new_posts: newPosts.length,
-    drafts_sent: draftsSent
+    published
   };
 }
 
 // ============================================================
-// РАЗБОР ПУБЛИКАЦИЙ TELEGRAM
+// ПАРСИНГ TELEGRAM
 // ============================================================
 
 function parseTelegramPosts(html, username) {
-  const matches = [
-    ...html.matchAll(/data-post=["']([^/"']+)\/(\d+)["']/g)
-  ];
-
+  const matches = [...html.matchAll(/data-post=["']([^/"']+)\/(\d+)["']/g)];
   const posts = [];
   const seen = new Set();
 
   for (const match of matches) {
     const id = Number(match[2]);
-
     if (!Number.isFinite(id) || seen.has(id)) continue;
     seen.add(id);
 
     const position = match.index;
-
     const start = html.lastIndexOf(
       '<div class="tgme_widget_message_wrap',
       position
     );
-
     const next = html.indexOf(
       '<div class="tgme_widget_message_wrap',
       position + match[0].length
@@ -529,13 +483,8 @@ function parseTelegramPosts(html, username) {
     );
 
     const text = textMatch ? htmlToText(textMatch[1]) : "";
-
-    const timeMatch = block.match(
-      /<time[^>]+datetime=["']([^"']+)["']/i
-    );
-
+    const timeMatch = block.match(/<time[^>]+datetime=["']([^"']+)["']/i);
     const date = timeMatch ? Date.parse(timeMatch[1]) : null;
-    const imageUrl = extractTelegramImage(block);
 
     if (text) {
       posts.push({
@@ -543,7 +492,7 @@ function parseTelegramPosts(html, username) {
         text: text.slice(0, 7000),
         date: Number.isFinite(date) ? date : null,
         url: `https://t.me/${username}/${id}`,
-        imageUrl
+        imageUrl: extractTelegramImage(block)
       });
     }
   }
@@ -577,9 +526,7 @@ async function telegramApi(env, method, data) {
     `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`,
     {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(data)
     }
   );
@@ -601,9 +548,7 @@ async function markDraftMessage(telegram, msg, text) {
       chat_id: msg.chat.id,
       message_id: msg.message_id,
       caption: text.slice(0, 1024),
-      reply_markup: {
-        inline_keyboard: []
-      }
+      reply_markup: { inline_keyboard: [] }
     });
   }
 
@@ -611,14 +556,12 @@ async function markDraftMessage(telegram, msg, text) {
     chat_id: msg.chat.id,
     message_id: msg.message_id,
     text: text.slice(0, 4000),
-    reply_markup: {
-      inline_keyboard: []
-    }
+    reply_markup: { inline_keyboard: [] }
   });
 }
 
 // ============================================================
-// ЧЕРНОВИК С ОДНОЙ КАРТИНКОЙ
+// РУЧНЫЕ ЧЕРНОВИКИ
 // ============================================================
 
 async function sendDraft(
@@ -640,80 +583,92 @@ async function sendDraft(
     ]
   };
 
-  // Используем постоянный баннер клуба.
   const bannerUrl = getClubBannerUrl(text);
   const result = await telegram("sendPhoto", {
     chat_id: chatId,
     photo: bannerUrl,
     caption: caption.slice(0, 1024),
     reply_markup: keyboard,
-    ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {})
+    ...(replyToMessageId
+      ? { reply_to_message_id: replyToMessageId }
+      : {})
   });
 
   if (result?.ok) return result;
 
   console.error("Could not send club banner:", result);
+
   return telegram("sendMessage", {
     chat_id: chatId,
     text:
-      "⚠️ Не удалось отправить постоянный баннер. Проверь, что файлы " +
-      "assets/molot.png, assets/parma.png, assets/amkar.png и assets/medvedi.png загружены в GitHub.\n\n" +
+      "⚠️ Не удалось отправить баннер. Проверь файлы в папке assets.\n\n" +
       text.slice(0, 3500),
-    ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {})
+    ...(replyToMessageId
+      ? { reply_to_message_id: replyToMessageId }
+      : {})
   });
 }
 
+// ============================================================
+// ВЫБОР БАННЕРА — НОВЫЕ ИМЕНА ФАЙЛОВ
+// ============================================================
+
 function getClubBannerUrl(text) {
   const value = String(text || "").toLowerCase();
-  const base = "https://raw.githubusercontent.com/alex1kriv-cmd/sportivny-krai-bot/main/assets/";
+  const base =
+    "https://raw.githubusercontent.com/alex1kriv-cmd/sportivny-krai-bot/main/assets/";
 
   if (/пермские медведи|permmedvedi|гандбол|гандболь|handball/.test(value)) {
-    return base + "medvedi.png";
+    return base + "medvedi-v2.png";
   }
 
   if (/парма|баскетбол|баскетболь|basketball/.test(value)) {
-    return base + "parma.png";
+    return base + "parma-v2.png";
   }
 
   if (/амкар|футбол|футболь|soccer|football/.test(value)) {
-    return base + "amkar.png";
+    return base + "amkar-v2.png";
   }
 
-  return base + "molot.png";
+  return base + "molot-v3.png";
 }
 
 // ============================================================
-// АВТОМАТИЧЕСКАЯ РЕДАКТУРА НОВОСТЕЙ
+// АВТОМАТИЧЕСКАЯ РЕДАКТУРА
 // ============================================================
 
 async function createMonitoredDraft(sourceText, env, channel) {
   const isHandball = channel?.type === "handball";
-  const systemPrompt = `Ты — спортивный журналист и выпускающий редактор Telegram-канала «Спортивный край» о спорте Пермского края.
+
+  const systemPrompt = `Ты — спортивный журналист и редактор Telegram-канала «Спортивный край» о спорте Пермского края.
 
 ОТБОР
-Пропускай рекламу, розыгрыши, дубли и малозначительные публикации. Рассматривай важные результаты, трансферы, кадровые решения, анонсы матчей, рекорды и интересные спортивные истории. Если материал не относится к значимым спортивным новостям Пермского края, ответь ровно SKIP.
+Пропускай рекламу, розыгрыши, дубли и малозначительные публикации. Для обычных источников выбирай значимые спортивные новости Пермского края.
 
-${isHandball ? `СТРОГИЙ ФИЛЬТР ДЛЯ ГАНДБОЛА
-Источник — канал гандбольного клуба «Пермские медведи». Публикуй ТОЛЬКО:
-1) анонсы предстоящих матчей команды;
-2) результаты уже сыгранных матчей команды.
-Любые другие материалы, включая тренировки, интервью, поздравления, сборы, составы без анонса матча, рекламу и общие новости клуба, пропускай ответом ровно SKIP. Если из текста нельзя уверенно понять, что это анонс матча или итоговый результат матча, ответь ровно SKIP.
-Для прошедшего матча обязательно сохраняй счёт только если он есть в источнике. Для анонса сохраняй дату, время и соперника только если они есть в источнике.
+${isHandball ? `СТРОГИЙ ФИЛЬТР ДЛЯ «ПЕРМСКИХ МЕДВЕДЕЙ»
+Публикуй ТОЛЬКО анонсы предстоящих матчей и результаты сыгранных матчей гандбольной команды.
+Пропускай интервью, тренировки, поздравления, сборы, рекламу, общие новости клуба и составы, если это не анонс конкретного матча.
+Если из исходника нельзя уверенно определить, что это анонс матча или его результат, верни ровно SKIP.
+Не выдумывай дату, время, соперника, счёт или статистику.
 ` : ""}
 
 СТИЛЬ
-Пиши живо, естественно и по-человечески, как опытный спортивный журналист. Не пересказывай пресс-релиз канцелярским языком. Начинай с главного факта. Меняй начало и структуру от публикации к публикации. Не используй штампы, пустой пафос, искусственную интригу и фразы вроде «подарили яркие эмоции», «впереди нас ждёт захватывающее противостояние», «это ещё раз доказывает».
+Пиши живо, естественно и по-человечески. Начинай с главного факта. Избегай канцелярита, штампов и искусственной интриги.
 
-СТРУКТУРА TELEGRAM
-Сделай короткий заголовок с одним подходящим эмодзи в первой строке. Затем оставь пустую строку и напиши 2–3 коротких абзаца. Каждый абзац — обычно 1–2 предложения. Добавь ещё 1 уместный эмодзи, только если он помогает передать тему; не ставь эмодзи в каждом предложении. Используй естественные переносы строк, чтобы текст не выглядел сплошной стеной.
+СТРУКТУРА
+Короткий заголовок с одним подходящим эмодзи в первой строке. Затем пустая строка и 2–3 коротких абзаца. Используй естественные переносы строк.
 
 ТОЧНОСТЬ
-Не выдумывай счёт, статистику, даты, имена, цитаты, травмы, трансферы, причины, последствия или турнирное положение. Не добавляй прогнозы и эмоции, которых нет в исходнике. Если данных мало, пиши коротко, не заполняй объём догадками.
+Не выдумывай счёт, статистику, даты, имена, цитаты, травмы, трансферы, причины или турнирное положение.
 
 ХЭШТЕГИ
-В конце добавь ровно два тематических хэштега: клуб/команда и вид спорта. Например: #Молот #Хоккей, #Парма #Баскетбол, #АмкарПермь #Футбол, #ПермскиеМедведи #Гандбол. Перед хэштегами оставь пустую строку. Не добавляй #Пермь и #СпортивныйКрай.
+В конце ровно два тематических хэштега.
+Для «Молота»: #Молот #Хоккей
+Для «ПАРМЫ»: #Парма #Баскетбол
+Для «Амкара»: #АмкарПермь #Футбол
+Для «Пермских медведей»: #ПермскиеМедведи #Гандбол
 
-Верни только готовую публикацию или SKIP. Сохраняй абзацы и переносы строк.`;
+Верни только готовую публикацию или SKIP.`;
 
   const response = await fetch(
     "https://api.openai.com/v1/chat/completions",
@@ -727,14 +682,8 @@ ${isHandball ? `СТРОГИЙ ФИЛЬТР ДЛЯ ГАНДБОЛА
         model: "gpt-4o-mini",
         temperature: 0.65,
         messages: [
-          {
-            role: "system",
-            content: systemPrompt
-          },
-          {
-            role: "user",
-            content: sourceText
-          }
+          { role: "system", content: systemPrompt },
+          { role: "user", content: sourceText }
         ]
       })
     }
@@ -759,12 +708,11 @@ ${isHandball ? `СТРОГИЙ ФИЛЬТР ДЛЯ ГАНДБОЛА
 }
 
 // ============================================================
-// ПОЛУЧЕНИЕ ИСХОДНОГО МАТЕРИАЛА ПО ССЫЛКЕ
+// ПОЛУЧЕНИЕ ИСХОДНОГО МАТЕРИАЛА
 // ============================================================
 
 async function getSourceMaterial(input) {
   const match = input.match(/https?:\/\/[^\s<>]+/i);
-
   if (!match) return input;
 
   const rawUrl = match[0].replace(/[),.!?]+$/, "");
@@ -776,9 +724,7 @@ async function getSourceMaterial(input) {
     return input;
   }
 
-  if (!["http:", "https:"].includes(url.protocol)) {
-    return input;
-  }
+  if (!["http:", "https:"].includes(url.protocol)) return input;
 
   const host = url.hostname.toLowerCase();
   let fetchUrl = url.href;
@@ -815,9 +761,7 @@ async function getSourceMaterial(input) {
         /class="tgme_widget_message_text[^"]*"[^>]*>([\s\S]*?)<\/div>/i
       );
 
-      if (post) {
-        extracted = htmlToText(post[1]);
-      }
+      if (post) extracted = htmlToText(post[1]);
     }
 
     if (!extracted) {
@@ -840,7 +784,6 @@ async function getSourceMaterial(input) {
     );
   } catch (error) {
     console.error("Source fetch failed:", String(error));
-
     return input.length > rawUrl.length ? input : null;
   }
 }
@@ -850,28 +793,29 @@ async function getSourceMaterial(input) {
 // ============================================================
 
 async function rewriteNews(sourceText, env, isRewrite = false) {
-  const systemPrompt = `Ты — спортивный журналист и выпускающий редактор Telegram-канала «Спортивный край» о спорте Пермского края.
+  const systemPrompt = `Ты — спортивный журналист и редактор Telegram-канала «Спортивный край».
 
-ЗАДАЧА И СТИЛЬ
-Подготовь самостоятельную редакционную публикацию, а не механический пересказ. Пиши живым современным русским языком, как опытный спортивный журналист для обычных читателей. Начинай с самого интересного подтверждённого факта. Меняй угол подачи и структуру, не используй одинаковые вступления.
+Подготовь самостоятельную редакционную публикацию живым современным русским языком. Начинай с самого интересного подтверждённого факта.
 
-ФОРМАТ TELEGRAM
-Первая строка — короткий заголовок с одним уместным эмодзи. После заголовка пустая строка. Далее 2–3 коротких абзаца, обычно по 1–2 предложения. Разделяй абзацы пустой строкой. Используй ещё 1 уместный эмодзи, если это подходит по смыслу, но не превращай текст в набор значков. Не пиши весь материал одним абзацем. Простую новость не раздувай.
+ФОРМАТ
+Короткий заголовок с одним уместным эмодзи. Пустая строка. Далее 2–3 коротких абзаца. Не превращай текст в сплошную стену.
 
 ИЗБЕГАЙ ШТАМПОВ
-Не начинай автоматически с «стало известно», «команда сообщила», «в рамках очередного тура», «состоялся матч». Не используй пустые обороты вроде «подарили болельщикам яркие эмоции», «впереди нас ждёт захватывающее противостояние», «это ещё раз доказывает», «спорт объединяет». Без канцелярита, искусственного пафоса и выдуманной интриги.
+Не используй канцелярит, пустой пафос, искусственную интригу и одинаковые вступления.
 
 ФАКТЫ
-Сохраняй важные факты исходника. Не придумывай счёт, статистику, даты, имена, цитаты, причины, последствия, травмы, трансферы и турнирное положение. Не выдавай предположения за факты. Не добавляй сведения, которых нет в источнике. Не копируй исходные фразы дословно, кроме официальных названий и необходимых цитат.
+Не придумывай счёт, статистику, даты, имена, цитаты, причины, последствия, травмы, трансферы или турнирное положение. Не добавляй сведений, которых нет в исходнике.
 
 ХЭШТЕГИ
-В конце добавь ровно два релевантных хэштега: клуб/команда и вид спорта. Например: #Молот #Хоккей, #Парма #Баскетбол, #АмкарПермь #Футбол. Перед хэштегами оставь пустую строку. Не добавляй #Пермь и #СпортивныйКрай.
+В конце добавь ровно два релевантных хэштега: команда и вид спорта.
+Примеры: #Молот #Хоккей, #Парма #Баскетбол, #АмкарПермь #Футбол.
+Перед хэштегами оставь пустую строку.
 
 ${isRewrite
-  ? "Создай действительно альтернативную версию: измени начало, угол подачи и структуру, сохранив все факты."
-  : "Подготовь живую и ясную публикацию, сохранив факты и смысл исходника."}
+  ? "Создай альтернативную версию с другим началом и структурой, сохранив факты."
+  : "Подготовь живую и ясную публикацию, сохранив факты исходника."}
 
-Верни только готовый текст. Обязательно сохрани абзацы и переносы строк.`;
+Верни только готовый текст.`;
 
   try {
     const response = await fetch(
@@ -886,10 +830,7 @@ ${isRewrite
           model: "gpt-4o-mini",
           temperature: isRewrite ? 0.8 : 0.65,
           messages: [
-            {
-              role: "system",
-              content: systemPrompt
-            },
+            { role: "system", content: systemPrompt },
             {
               role: "user",
               content: "Исходный материал:\n\n" + sourceText
@@ -905,7 +846,6 @@ ${isRewrite
         response.status,
         await response.text()
       );
-
       return null;
     }
 
@@ -941,10 +881,7 @@ function getMeta(html, property) {
 
   for (const pattern of patterns) {
     const result = html.match(pattern);
-
-    if (result) {
-      return htmlToText(result[1]);
-    }
+    if (result) return htmlToText(result[1]);
   }
 
   return "";
@@ -952,7 +889,6 @@ function getMeta(html, property) {
 
 function getTitle(html) {
   const match = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
-
   return match ? htmlToText(match[1]) : "";
 }
 
