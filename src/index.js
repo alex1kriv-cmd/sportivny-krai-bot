@@ -470,7 +470,7 @@ async function fetchStandingsSource(source) {
     .replace(/<[^>]+>/g, " ")
     .replace(/&nbsp;|&#160;/gi, " ")
     .replace(/&amp;/gi, "&")
-    .replace(/&quot;/gi, '" '.trim())
+    .replace(/&quot;/gi, '"')
     .replace(/&#39;|&apos;/gi, "'")
     .replace(/&mdash;|&ndash;/gi, "-")
     .replace(/\s+/g, " ")
