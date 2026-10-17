@@ -296,6 +296,7 @@ export default {
           return;
         }
         await monitorChannels(env);
+        await monitorOfficialBasketballResults(env);
       } catch (error) {
         console.error("CRON_FATAL", cron, String(error));
         if (env.NEWS_KV) {
@@ -310,6 +311,119 @@ export default {
     })());
   }
 };
+
+// ============================================================
+// ОФИЦИАЛЬНЫЕ РЕЗУЛЬТАТЫ БАСКЕТБОЛА — РФБ (RussiaBasket)
+// Проверяем страницы матчей РФБ; не используем клубные Telegram-посты
+// как источник счёта. При сомнительном статусе/счёте ничего не публикуем.
+// ============================================================
+
+async function monitorOfficialBasketballResults(env) {
+  if (!env.NEWS_KV || !env.TELEGRAM_BOT_TOKEN) {
+    throw new Error("Official basketball monitor requires NEWS_KV and Telegram token");
+  }
+
+  const sourceUrl = "https://russiabasket.ru/";
+  const response = await fetch(sourceUrl, {
+    headers: { "User-Agent": "Mozilla/5.0 (compatible; SportivnyKraiBot/1.0)" },
+    redirect: "follow",
+    signal: AbortSignal.timeout(15000)
+  });
+  if (!response.ok) throw new Error(`RussiaBasket HTTP ${response.status}`);
+
+  const html = await response.text();
+  // РФБ использует отдельные карточки матчей /game/{id}. Берём только ссылки
+  // с официального домена и проверяем каждую страницу отдельно.
+  const ids = [...new Set([...html.matchAll(/href=["'](?:https?:\/\/russiabasket\.ru)?\/game\/(\d+)(?:\?[^"']*)?["']/gi)]
+    .map(match => match[1]))].slice(0, 30);
+
+  let checked = 0;
+  let published = 0;
+  for (const id of ids) {
+    const key = `official-result:russiabasket:${id}`;
+    if (await env.NEWS_KV.get(key)) continue;
+
+    const gameUrl = `https://russiabasket.ru/game/${id}`;
+    const gameResponse = await fetch(gameUrl, {
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; SportivnyKraiBot/1.0)" },
+      redirect: "follow",
+      signal: AbortSignal.timeout(12000)
+    });
+    if (!gameResponse.ok) continue;
+
+    const gameHtml = await gameResponse.text();
+    const text = htmlToText(gameHtml)
+      .replace(/\s+/g, " ")
+      .trim();
+
+    // This adapter currently publishes only the senior Parma team. Youth
+    // competitions are intentionally handled separately, to avoid mixing teams.
+    if (!/БЕТСИТИ\s+ПАРМА|ПАРМА\s+Пермский край/i.test(text)) continue;
+    checked++;
+
+    const finished = /\bЗавершена\b|\bМатч заверш[её]н\b|\bИгра завершена\b/i.test(text);
+    if (!finished) continue;
+
+    // On official game cards, the two final scores immediately follow the
+    // completed status. If this exact structure is absent, fail closed.
+    const scoreMatch = text.match(/(?:Завершена|Матч заверш[её]н|Игра завершена)\s+(\d{1,3})\s+(\d{1,3})\b/i);
+    if (!scoreMatch) continue;
+
+    const scoreA = Number(scoreMatch[1]);
+    const scoreB = Number(scoreMatch[2]);
+    if (!Number.isInteger(scoreA) || !Number.isInteger(scoreB) ||
+        scoreA < 0 || scoreB < 0 || scoreA > 200 || scoreB > 200 ||
+        (scoreA === 0 && scoreB === 0)) continue;
+
+    // Record non-Parma result pages as checked only after the team check above.
+    // The page order on RussiaBasket is home team, status, home score, away score,
+    // away team. We intentionally avoid inferring the opponent from noisy markup.
+    const post = [
+      "🏀 «ПАРМА»: результат матча",
+      "",
+      `Итоговый счёт по данным РФБ: ${scoreA}:${scoreB}.`,
+      "",
+      `Источник: ${gameUrl}`,
+      "",
+      "#Парма #Баскетбол"
+    ].join("\n");
+
+    const sent = await telegramApi(env, "sendPhoto", {
+      chat_id: TARGET_CHANNEL,
+      photo: getClubBannerUrl("ПАРМА баскетбол"),
+      caption: post.slice(0, 1024)
+    });
+    let result = sent;
+    if (!sent?.ok) {
+      result = await telegramApi(env, "sendMessage", {
+        chat_id: TARGET_CHANNEL,
+        text: post.slice(0, 4000),
+        disable_web_page_preview: true
+      });
+    }
+    if (!result?.ok) throw new Error(`Could not publish official RussiaBasket result ${id}`);
+
+    await env.NEWS_KV.put(key, JSON.stringify({
+      status: "published",
+      source: "russiabasket.ru",
+      game_id: id,
+      score: [scoreA, scoreB],
+      published_at: new Date().toISOString()
+    }));
+    published++;
+  }
+
+  const status = {
+    last_run: new Date().toISOString(),
+    source: "russiabasket.ru",
+    discovered_match_pages: ids.length,
+    checked_parma_pages: checked,
+    published,
+    state: "completed"
+  };
+  await env.NEWS_KV.put("official-results:russiabasket:status", JSON.stringify(status));
+  console.log("OFFICIAL_RUSSIABASKET_RESULTS", JSON.stringify(status));
+}
 
 // ============================================================
 // ЕЖЕНЕДЕЛЬНЫЙ КАЛЕНДАРЬ И ИТОГИ ВЫХОДНЫХ
