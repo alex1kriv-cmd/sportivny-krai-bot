@@ -619,18 +619,18 @@ function getClubBannerUrl(text) {
     "https://raw.githubusercontent.com/alex1kriv-cmd/sportivny-krai-bot/main/assets/";
 
   if (/пермские медведи|permmedvedi|гандбол|гандболь|handball/.test(value)) {
-    return base + "medvedi-v2.png";
+    return base + "medvedi.png";
   }
 
   if (/парма|баскетбол|баскетболь|basketball/.test(value)) {
-    return base + "parma-v2.png";
+    return base + "parma.png";
   }
 
   if (/амкар|футбол|футболь|soccer|football/.test(value)) {
-    return base + "amkar-v2.png";
+    return base + "amkar.png";
   }
 
-  return base + "molot-v3.png";
+  return base + "molot.png";
 }
 
 // ============================================================
