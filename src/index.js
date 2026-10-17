@@ -10,6 +10,14 @@ const CHANNELS = [
   }
 ];
 
+
+const STANDINGS_SOURCES = [
+  { name: "ХК «Молот»", url: "https://vhlru.ru/calendar/", team: "Молот" },
+  { name: "БК «ПАРМА»", url: "https://vtb-league.com/ru/rbwidget/standings/?compId=55613", team: "ПАРМА" },
+  { name: "ФК «Амкар Пермь»", url: "https://www.sport-express.ru/football/n/russia/d2/silver/2026-2027/table/", team: "Амкар" },
+  { name: "ГК «Пермские медведи»", url: "https://rushandball.ru/competitions/12179/", team: "Пермские медведи" }
+];
+
 const PREFIX = "telegram-source:";
 const MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const TARGET_CHANNEL = "@sportkrai";
@@ -283,6 +291,10 @@ export default {
           await publishWeekendRecap(env);
           return;
         }
+        if (cron === "0 13 * * 2") {
+          await publishStandings(env);
+          return;
+        }
         await monitorChannels(env);
       } catch (error) {
         console.error("CRON_FATAL", cron, String(error));
@@ -442,6 +454,62 @@ async function publishWeeklyCalendar(env) {
 
 async function publishWeekendRecap(env) {
   return publishScheduledPost("recap", env);
+}
+
+async function fetchStandingsSource(source) {
+  const response = await fetch(source.url, {
+    headers: { "User-Agent": "Mozilla/5.0 (compatible; SportivnyKraiBot/1.0)" },
+    signal: AbortSignal.timeout(15000)
+  });
+  if (!response.ok) throw new Error("HTTP " + response.status);
+  const html = await response.text();
+  const cleaned = html
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<(?:br|\/tr|\/td|\/th|\/li|\/p|\/h[1-6])\b[^>]*>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;|&#160;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '" '.trim())
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&mdash;|&ndash;/gi, "-")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (cleaned.length < 250) throw new Error("Page has too little readable content");
+  return { name: source.name, url: source.url, team: source.team, text: cleaned.slice(0, 14000) };
+}
+
+async function publishStandings(env) {
+  if (!env.NEWS_KV || !env.OPENAI_API_KEY || !env.TELEGRAM_BOT_TOKEN) throw new Error("Missing required environment binding");
+  const date = localDateISO();
+  const key = "scheduled-post:standings:" + date;
+  if (await env.NEWS_KV.get(key)) return;
+  const sources = [];
+  const failures = [];
+  for (const source of STANDINGS_SOURCES) {
+    try { sources.push(await fetchStandingsSource(source)); }
+    catch (error) { failures.push(source.team + ": " + String(error)); console.error("STANDINGS_SOURCE_ERROR", source.team, String(error)); }
+  }
+  if (sources.length !== STANDINGS_SOURCES.length) throw new Error("Standings post aborted; incomplete source set: " + failures.join("; "));
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + env.OPENAI_API_KEY, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-4o-mini", temperature: 0,
+      messages: [
+        { role: "system", content: "Ты редактор спортивного Telegram-канала «Спортивный край». Подготовь компактную публикацию «📊 Положение пермских команд». Для каждой команды укажи место и очки только если они прямо присутствуют в переданном тексте и однозначно относятся к нужной команде: ХК «Молот» (ВХЛ), БК «ПАРМА» (Единая лига ВТБ), ФК «Амкар Пермь» (вторая лига А, группа «Серебро»), ГК «Пермские медведи» (мужская Суперлига). Если нужная таблица или команда не читается, напиши «данные не удалось подтвердить». Не смешивай сезоны и турниры. Укажи URL источника из поля url. Не выдумывай данные или ссылки. Внизу ровно два хэштега: #СпортивныйКрай #СпортПрикамья. Верни только текст публикации." },
+        { role: "user", content: JSON.stringify({ date: date, sources: sources }) }
+      ]
+    })
+  });
+  if (!response.ok) throw new Error("OpenAI standings HTTP " + response.status);
+  const result = await response.json();
+  const post = result.choices && result.choices[0] && result.choices[0].message && result.choices[0].message.content ? result.choices[0].message.content.trim() : "";
+  if (!post) throw new Error("Empty standings response");
+  const sent = await telegramApi(env, "sendMessage", { chat_id: TARGET_CHANNEL, text: post.slice(0, 3600) + "\n\n🤖 Автоматическая публикация", disable_web_page_preview: true });
+  if (!sent || !sent.ok) throw new Error("Telegram failed to publish standings");
+  await env.NEWS_KV.put(key, JSON.stringify({ status: "published", date: date, message_id: sent.result && sent.result.message_id || null }));
+  console.log("STANDINGS_POST_PUBLISHED", date);
 }
 
 // ============================================================
