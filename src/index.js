@@ -619,7 +619,13 @@ async function scanChannel(channel, env) {
     const sourceText =
       `${channel.name}\nИсточник: ${post.url}\n\n${post.text}`;
 
-    const draft = await createMonitoredDraft(sourceText, env, channel);
+    let draft = await createMonitoredDraft(sourceText, env, channel);
+
+    // Match-result posts must not be silently filtered by the general news selector.
+    // If the editor model rejects one, publish a conservative source-faithful fallback.
+    if (draft === "SKIP" && isFinalMatchResultPost(post.text)) {
+      draft = buildMatchResultFallback(channel, post);
+    }
 
     if (draft === "SKIP") {
       await env.NEWS_KV.put(processedKey, "skipped");
@@ -860,6 +866,28 @@ function getClubBannerUrl(text) {
 }
 
 // ============================================================
+// ПРИОРИТЕТ РЕЗУЛЬТАТОВ МАТЧЕЙ
+// ============================================================
+
+function isFinalMatchResultPost(text) {
+  const value = String(text || "").toLowerCase();
+  const hasScore = /\b\d{1,2}\s*[:–-]\s*\d{1,2}\b/.test(value);
+  const resultLanguage = /\b(победил\w*|побед\w*|обыграл\w*|выиграл\w*|проиграл\w*|уступил\w*|ничь\w*|вничью|завершил\w*|итогов\w* счет|финальн\w* счет|одержал\w* побед\w*)\b/.test(value);
+  return hasScore && resultLanguage;
+}
+
+function buildMatchResultFallback(channel, post) {
+  const hashtags = channel.username === "hcmolotperm"
+    ? "#Молот #Хоккей"
+    : channel.username === "parmabasketprm"
+      ? "#Парма #Баскетбол"
+      : channel.username === "amkarprm"
+        ? "#АмкарПермь #Футбол"
+        : "#ПермскиеМедведи #Гандбол";
+  return `🏁 Результат матча — ${channel.name}\n\n${post.text.slice(0, 1800)}\n\n${hashtags}`;
+}
+
+// ============================================================
 // АВТОМАТИЧЕСКАЯ РЕДАКТУРА
 // ============================================================
 
@@ -869,7 +897,7 @@ async function createMonitoredDraft(sourceText, env, channel) {
   const systemPrompt = `Ты — спортивный журналист и редактор Telegram-канала «Спортивный край» о спорте Пермского края.
 
 ОТБОР
-Пропускай рекламу, розыгрыши, дубли и малозначительные публикации. Для обычных источников выбирай значимые спортивные новости Пермского края.
+Пропускай рекламу, розыгрыши и дубли. Для обычных источников выбирай значимые спортивные новости Пермского края. ОБЯЗАТЕЛЬНО публикуй финальные результаты матчей команд, если исходник содержит итоговый счёт и слова о победе, поражении или ничьей. Не пропускай подтверждённый результат матча как малозначительную новость.
 
 ${isHandball ? `СТРОГИЙ ФИЛЬТР ДЛЯ «ПЕРМСКИХ МЕДВЕДЕЙ»
 Публикуй ТОЛЬКО анонсы предстоящих матчей и результаты сыгранных матчей гандбольной команды.
