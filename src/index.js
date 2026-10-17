@@ -270,21 +270,32 @@ export default {
   },
 
   async scheduled(controller, env, ctx) {
-    console.log("CRON_STARTED", new Date().toISOString());
+    const cron = controller.cron || "*/15 * * * *";
+    console.log("CRON_STARTED", cron, new Date().toISOString());
 
-    ctx.waitUntil(
-      monitorChannels(env).catch(async error => {
-        console.error("CRON_FATAL", String(error));
-
+    ctx.waitUntil((async () => {
+      try {
+        if (cron === "0 13 * * 4") {
+          await publishWeeklyCalendar(env);
+          return;
+        }
+        if (cron === "0 4 * * 1") {
+          await publishWeekendRecap(env);
+          return;
+        }
+        await monitorChannels(env);
+      } catch (error) {
+        console.error("CRON_FATAL", cron, String(error));
         if (env.NEWS_KV) {
           await env.NEWS_KV.put("monitor:status", JSON.stringify({
             last_run: new Date().toISOString(),
+            cron,
             state: "error",
-            error: String(error)
+            error: String(error).slice(0, 500)
           }));
         }
-      })
-    );
+      }
+    })());
   }
 };
 
