@@ -295,7 +295,12 @@ export default {
           await publishStandings(env);
           return;
         }
+        if (cron === "0 17 * * *") {
+          await publishDailySummaries(env);
+          return;
+        }
         await monitorChannels(env);
+        await monitorOfficialBasketballResults(env);
       } catch (error) {
         console.error("CRON_FATAL", cron, String(error));
         if (env.NEWS_KV) {
@@ -310,6 +315,134 @@ export default {
     })());
   }
 };
+
+// ============================================================
+// ОФИЦИАЛЬНЫЕ РЕЗУЛЬТАТЫ БАСКЕТБОЛА — РФБ (RussiaBasket)
+// Проверяем страницы матчей РФБ; не используем клубные Telegram-посты
+// как источник счёта. При сомнительном статусе/счёте ничего не публикуем.
+// ============================================================
+
+async function monitorOfficialBasketballResults(env) {
+  if (!env.NEWS_KV || !env.TELEGRAM_BOT_TOKEN) {
+    throw new Error("Official basketball monitor requires NEWS_KV and Telegram token");
+  }
+
+  const sourceUrl = "https://russiabasket.ru/";
+  const response = await fetch(sourceUrl, {
+    headers: { "User-Agent": "Mozilla/5.0 (compatible; SportivnyKraiBot/1.0)" },
+    redirect: "follow",
+    signal: AbortSignal.timeout(15000)
+  });
+  if (!response.ok) throw new Error(`RussiaBasket HTTP ${response.status}`);
+
+  const html = await response.text();
+  // РФБ использует отдельные карточки матчей /game/{id}. Берём только ссылки
+  // с официального домена и проверяем каждую страницу отдельно.
+  const ids = [...new Set([...html.matchAll(/href=["'](?:https?:\/\/russiabasket\.ru)?\/game\/(\d+)(?:\?[^"']*)?["']/gi)]
+    .map(match => match[1]))].slice(0, 30);
+
+  let checked = 0;
+  let published = 0;
+  for (const id of ids) {
+    const key = `official-result:russiabasket:${id}`;
+    if (await env.NEWS_KV.get(key)) continue;
+
+    const gameUrl = `https://russiabasket.ru/game/${id}`;
+    const gameResponse = await fetch(gameUrl, {
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; SportivnyKraiBot/1.0)" },
+      redirect: "follow",
+      signal: AbortSignal.timeout(12000)
+    });
+    if (!gameResponse.ok) continue;
+
+    const gameHtml = await gameResponse.text();
+    const text = htmlToText(gameHtml)
+      .replace(/\s+/g, " ")
+      .trim();
+
+    // This adapter currently publishes only the senior Parma team. Youth
+    // competitions are intentionally handled separately, to avoid mixing teams.
+    if (!/БЕТСИТИ\s+ПАРМА|ПАРМА\s+Пермский край/i.test(text)) continue;
+    checked++;
+
+    const finished = /\bЗавершена\b|\bМатч заверш[её]н\b|\bИгра завершена\b/i.test(text);
+    if (!finished) continue;
+
+    // On official game cards, the two final scores immediately follow the
+    // completed status. If this exact structure is absent, fail closed.
+    const scoreMatch = text.match(/(?:Завершена|Матч заверш[её]н|Игра завершена)\s+(\d{1,3})\s+(\d{1,3})\b/i);
+    if (!scoreMatch) continue;
+
+    const scoreA = Number(scoreMatch[1]);
+    const scoreB = Number(scoreMatch[2]);
+    if (!Number.isInteger(scoreA) || !Number.isInteger(scoreB) ||
+        scoreA < 0 || scoreB < 0 || scoreA > 200 || scoreB > 200 ||
+        (scoreA === 0 && scoreB === 0)) continue;
+
+    // Determine Parma's side from the official match-card order. If the card
+    // does not clearly place Parma before or after the score pair, do not publish.
+    const statusIndex = text.search(/(?:Завершена|Матч заверш[её]н|Игра завершена)/i);
+    const parmaIndex = text.search(/БЕТСИТИ\s+ПАРМА|ПАРМА\s+Пермский край/i);
+    const scoreIndex = text.indexOf(scoreMatch[0], statusIndex);
+    let parmaScore;
+    let opponentScore;
+    if (parmaIndex >= 0 && parmaIndex < statusIndex) {
+      parmaScore = scoreA;
+      opponentScore = scoreB;
+    } else if (parmaIndex > scoreIndex && scoreIndex >= 0) {
+      parmaScore = scoreB;
+      opponentScore = scoreA;
+    } else {
+      console.log("RUSSIABASKET_UNCLEAR_TEAM_ORDER", id);
+      continue;
+    }
+
+    const post = [
+      "🏀 «ПАРМА»: результат матча",
+      "",
+      `Матч завершён. Счёт «ПАРМЫ»: ${parmaScore}:${opponentScore}.`,
+      "",
+      `Источник: ${gameUrl}`,
+      "",
+      "#Парма #Баскетбол"
+    ].join("\n");
+
+    const sent = await telegramApi(env, "sendPhoto", {
+      chat_id: TARGET_CHANNEL,
+      photo: getClubBannerUrl("ПАРМА баскетбол"),
+      caption: post.slice(0, 1024)
+    });
+    let result = sent;
+    if (!sent?.ok) {
+      result = await telegramApi(env, "sendMessage", {
+        chat_id: TARGET_CHANNEL,
+        text: post.slice(0, 4000),
+        disable_web_page_preview: true
+      });
+    }
+    if (!result?.ok) throw new Error(`Could not publish official RussiaBasket result ${id}`);
+
+    await env.NEWS_KV.put(key, JSON.stringify({
+      status: "published",
+      source: "russiabasket.ru",
+      game_id: id,
+      score: [scoreA, scoreB],
+      published_at: new Date().toISOString()
+    }));
+    published++;
+  }
+
+  const status = {
+    last_run: new Date().toISOString(),
+    source: "russiabasket.ru",
+    discovered_match_pages: ids.length,
+    checked_parma_pages: checked,
+    published,
+    state: "completed"
+  };
+  await env.NEWS_KV.put("official-results:russiabasket:status", JSON.stringify(status));
+  console.log("OFFICIAL_RUSSIABASKET_RESULTS", JSON.stringify(status));
+}
 
 // ============================================================
 // ЕЖЕНЕДЕЛЬНЫЙ КАЛЕНДАРЬ И ИТОГИ ВЫХОДНЫХ
@@ -561,121 +694,165 @@ async function monitorChannels(env) {
 
 async function scanChannel(channel, env) {
   const response = await fetch(`https://t.me/s/${channel.username}`, {
-    headers: {
-      "User-Agent": "Mozilla/5.0 (compatible; SportivnyKraiBot/1.0)"
-    },
+    headers: { "User-Agent": "Mozilla/5.0 (compatible; SportivnyKraiBot/1.0)" },
     signal: AbortSignal.timeout(15000)
   });
-
-  if (!response.ok) {
-    throw new Error(`Telegram HTTP ${response.status}`);
-  }
-
-  const html = await response.text();
-  const posts = parseTelegramPosts(html, channel.username);
-
-  if (!posts.length) {
-    throw new Error("No posts extracted from public Telegram page");
-  }
-
+  if (!response.ok) throw new Error(`Telegram HTTP ${response.status}`);
+  const posts = parseTelegramPosts(await response.text(), channel.username);
+  if (!posts.length) throw new Error("No posts extracted from public Telegram page");
   const cursorKey = `${PREFIX}${channel.username}:latest`;
   const savedCursor = await env.NEWS_KV.get(cursorKey);
   const latestId = Math.max(...posts.map(post => post.id));
-
   if (savedCursor === null) {
     await env.NEWS_KV.put(cursorKey, String(latestId));
-    console.log("CRON_BASELINE", channel.username, latestId);
-
-    return {
-      state: "baseline",
-      posts_found: posts.length,
-      latest_id: latestId,
-      published: 0
-    };
+    return { state: "baseline", posts_found: posts.length, latest_id: latestId, published: 0, queued: 0 };
   }
-
   const previousId = Number(savedCursor) || 0;
-  const newPosts = posts
-    .filter(post => post.id > previousId)
-    .sort((a, b) => a.id - b.id);
-
-  let published = 0;
-  let highestProcessed = previousId;
-
+  const newPosts = posts.filter(post => post.id > previousId).sort((a, b) => a.id - b.id);
+  let published = 0, queued = 0, highestProcessed = previousId;
   for (const post of newPosts.slice(0, 5)) {
     const processedKey = `${PREFIX}${channel.username}:${post.id}`;
-
     if (await env.NEWS_KV.get(processedKey)) {
       highestProcessed = Math.max(highestProcessed, post.id);
       continue;
     }
-
     if (post.date && Date.now() - post.date > MAX_AGE_MS) {
       await env.NEWS_KV.put(processedKey, "old");
       highestProcessed = Math.max(highestProcessed, post.id);
       continue;
     }
-
-    const sourceText =
-      `${channel.name}\nИсточник: ${post.url}\n\n${post.text}`;
-
-    const draft = await createMonitoredDraft(sourceText, env, channel);
-
-    if (draft === "SKIP") {
-      await env.NEWS_KV.put(processedKey, "skipped");
-      highestProcessed = Math.max(highestProcessed, post.id);
-      continue;
+    const sourceText = `${channel.name}\nИсточник: ${post.url}\n\n${post.text}`;
+    const category = await classifyMonitoredPost(sourceText, env, channel);
+    if (category === "URGENT" || category === "MATCH_ANNOUNCEMENT") {
+      const draft = await createMonitoredDraft(sourceText, env, channel);
+      if (draft === "SKIP") {
+        await env.NEWS_KV.put(processedKey, "skipped-by-editor");
+      } else {
+        const publication = `${draft}\n\nИсточник: ${post.url}\n\n🤖 Автоматическая новость`;
+        let sent = await telegramApi(env, "sendPhoto", {
+          chat_id: TARGET_CHANNEL, photo: getClubBannerUrl(`${channel.name}\n${sourceText}`), caption: publication.slice(0, 1024)
+        });
+        if (!sent?.ok) sent = await telegramApi(env, "sendMessage", {
+          chat_id: TARGET_CHANNEL, text: publication.slice(0, 4000), disable_web_page_preview: true
+        });
+        if (!sent?.ok) throw new Error(`Could not publish ${post.url}`);
+        published++;
+        await env.NEWS_KV.put(processedKey, `published:${category}`);
+      }
+    } else if (category === "DIGEST") {
+      const digestDate = localDateISO(post.date ? new Date(post.date) : new Date());
+      const digestKey = `daily-digest:${channel.username}:${digestDate}:${post.id}`;
+      await env.NEWS_KV.put(digestKey, JSON.stringify({
+        club: channel.name, channel: channel.username, id: post.id,
+        date: post.date ? new Date(post.date).toISOString() : null, url: post.url, text: post.text.slice(0, 2500)
+      }), { expirationTtl: 5 * 24 * 60 * 60 });
+      await env.NEWS_KV.put(processedKey, "queued-for-digest");
+      queued++;
+    } else {
+      await env.NEWS_KV.put(processedKey, `skipped:${category}`);
     }
-
-    const publication =
-      `${draft}\n\nИсточник: ${post.url}\n\n🤖 Автоматическая новость`;
-
-    const bannerUrl = getClubBannerUrl(`${channel.name}\n${sourceText}`);
-    const telegram = (method, data) => telegramApi(env, method, data);
-
-    let sent = await telegram("sendPhoto", {
-      chat_id: TARGET_CHANNEL,
-      photo: bannerUrl,
-      caption: publication.slice(0, 1024)
-    });
-
-    if (!sent?.ok) {
-      console.error("Photo publication failed:", sent);
-
-      sent = await telegram("sendMessage", {
-        chat_id: TARGET_CHANNEL,
-        text: publication.slice(0, 4000)
-      });
-    }
-
-    if (!sent?.ok) {
-      throw new Error(`Could not publish ${post.url}`);
-    }
-
-    published++;
-    await env.NEWS_KV.put(processedKey, "published");
     highestProcessed = Math.max(highestProcessed, post.id);
   }
-
-  if (highestProcessed > previousId) {
-    await env.NEWS_KV.put(cursorKey, String(highestProcessed));
-  }
-
-  console.log("CRON_CHANNEL_DONE", channel.username, {
-    posts_found: posts.length,
-    new_posts: newPosts.length,
-    published
-  });
-
-  return {
-    state: "ok",
-    posts_found: posts.length,
-    new_posts: newPosts.length,
-    published
-  };
+  if (highestProcessed > previousId) await env.NEWS_KV.put(cursorKey, String(highestProcessed));
+  const result = { state: "ok", posts_found: posts.length, new_posts: newPosts.length, published, queued };
+  console.log("CRON_CHANNEL_DONE", channel.username, result);
+  return result;
 }
 
-// ============================================================
+async function classifyMonitoredPost(sourceText, env, channel) {
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: "gpt-4o-mini", temperature: 0,
+      messages: [
+        { role: "system", content: `Классифицируй публикацию клуба «${channel?.name || ""}». Верни ровно одну метку:
+MATCH_ANNOUNCEMENT — конкретный анонс предстоящего матча;
+URGENT — действительно важная новость: официальный трансфер/подписание, отставка, серьёзная травма, отмена или перенос матча, важное официальное решение;
+DIGEST — содержательная, но несрочная новость для вечерней сводки (тренировка, интервью, подготовка, поездка, новости команды);
+MATCH_RESULT — результат/счёт сыгранного матча; результаты публикуются отдельно из официальных источников, поэтому не публикуй из Telegram;
+SKIP — реклама, розыгрыш, поздравление, дубль, малозначительный пост.
+Само слово «срочно» не является основанием для URGENT. Не угадывай факты.` },
+        { role: "user", content: sourceText.slice(0, 7000) }
+      ]
+    })
+  });
+  if (!response.ok) throw new Error(`OpenAI classification HTTP ${response.status}`);
+  const data = await response.json();
+  const label = data.choices?.[0]?.message?.content?.trim().toUpperCase();
+  return ["MATCH_ANNOUNCEMENT", "URGENT", "DIGEST", "MATCH_RESULT", "SKIP"].includes(label) ? label : "SKIP";
+}
+
+async function publishDailySummaries(env) {
+  const date = localDateISO();
+  const overall = { date, last_run: new Date().toISOString(), state: "completed", channels: {} };
+  for (const channel of CHANNELS) {
+    const publicationKey = `daily-summary-published:${channel.username}:${date}`;
+    if (await env.NEWS_KV.get(publicationKey)) {
+      overall.channels[channel.username] = "already-published";
+      continue;
+    }
+    const listed = await env.NEWS_KV.list({ prefix: `daily-digest:${channel.username}:${date}:`, limit: 100 });
+    const items = [];
+    for (const item of listed.keys) {
+      const value = await env.NEWS_KV.get(item.name, "json");
+      if (value) items.push(value);
+    }
+    items.sort((a,b) => String(a.date || "").localeCompare(String(b.date || "")));
+    if (!items.length) {
+      overall.channels[channel.username] = "no-digest-items";
+      continue;
+    }
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "gpt-4o-mini", temperature: 0.25,
+        messages: [
+          { role: "system", content: `Ты редактор Telegram-канала «Спортивный край». Составь короткую вечернюю сводку публикаций клуба «${channel.name}» за ${date}. Объедини значимые факты, не перечисляй мелочи и дубли. Не добавляй фактов, которых нет в источниках. Не включай результаты и счёт матчей — они публикуются отдельно по официальным источникам. Заголовок «🗞 День клуба: ${channel.name}». Добавь ссылки только из предоставленных источников и в конце ровно два хэштега клуба и вида спорта. Если содержательных новостей нет, верни ровно NO_SUMMARY.` },
+          { role: "user", content: JSON.stringify(items) }
+        ]
+      })
+    });
+    if (!response.ok) throw new Error(`OpenAI daily summary HTTP ${response.status}`);
+    const data = await response.json();
+    const summary = data.choices?.[0]?.message?.content?.trim();
+    if (!summary) throw new Error(`Empty daily summary for ${channel.username}`);
+    if (summary === "NO_SUMMARY") {
+      await env.NEWS_KV.put(publicationKey, "no-summary");
+      overall.channels[channel.username] = "no-summary";
+      continue;
+    }
+    const suppliedUrls = new Set(items.map(item => item.url));
+    const summaryUrls = summary.match(/https?:\/\/[^\s)\]>]+/g) || [];
+    const inventedUrls = summaryUrls.filter(url => !suppliedUrls.has(url.replace(/[.,!?]+$/, "")));
+    if (inventedUrls.length) throw new Error(`Daily summary rejected unverified links for ${channel.username}: ${inventedUrls.join(", ")}`);
+
+    let sent;
+    if (summary.length <= 1024) {
+      sent = await telegramApi(env, "sendPhoto", {
+        chat_id: TARGET_CHANNEL, photo: getClubBannerUrl(channel.name), caption: summary
+      });
+    } else {
+      sent = await telegramApi(env, "sendMessage", {
+        chat_id: TARGET_CHANNEL, text: summary.slice(0, 3800), disable_web_page_preview: true
+      });
+    }
+    if (!sent?.ok && summary.length <= 1024) {
+      sent = await telegramApi(env, "sendMessage", {
+        chat_id: TARGET_CHANNEL, text: summary.slice(0, 3800), disable_web_page_preview: true
+      });
+    }
+    if (!sent?.ok) throw new Error(`Could not publish daily summary for ${channel.username}`);
+    await env.NEWS_KV.put(publicationKey, JSON.stringify({
+      status: "published", date, message_id: sent.result?.message_id || null, items: items.length, published_at: new Date().toISOString()
+    }));
+    overall.channels[channel.username] = { status: "published", items: items.length };
+  }
+  await env.NEWS_KV.put("daily-summary:status", JSON.stringify(overall));
+  console.log("DAILY_SUMMARIES_FINISHED", JSON.stringify(overall));
+}
+
 // ПАРСИНГ TELEGRAM
 // ============================================================
 
