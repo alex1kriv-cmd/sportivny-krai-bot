@@ -823,12 +823,26 @@ async function publishDailySummaries(env) {
       overall.channels[channel.username] = "no-summary";
       continue;
     }
-    let sent = await telegramApi(env, "sendPhoto", {
-      chat_id: TARGET_CHANNEL, photo: getClubBannerUrl(channel.name), caption: summary.slice(0, 1024)
-    });
-    if (!sent?.ok) sent = await telegramApi(env, "sendMessage", {
-      chat_id: TARGET_CHANNEL, text: summary.slice(0, 3800), disable_web_page_preview: true
-    });
+    const suppliedUrls = new Set(items.map(item => item.url));
+    const summaryUrls = summary.match(/https?:\/\/[^\s)\]>]+/g) || [];
+    const inventedUrls = summaryUrls.filter(url => !suppliedUrls.has(url.replace(/[.,!?]+$/, "")));
+    if (inventedUrls.length) throw new Error(`Daily summary rejected unverified links for ${channel.username}: ${inventedUrls.join(", ")}`);
+
+    let sent;
+    if (summary.length <= 1024) {
+      sent = await telegramApi(env, "sendPhoto", {
+        chat_id: TARGET_CHANNEL, photo: getClubBannerUrl(channel.name), caption: summary
+      });
+    } else {
+      sent = await telegramApi(env, "sendMessage", {
+        chat_id: TARGET_CHANNEL, text: summary.slice(0, 3800), disable_web_page_preview: true
+      });
+    }
+    if (!sent?.ok && summary.length <= 1024) {
+      sent = await telegramApi(env, "sendMessage", {
+        chat_id: TARGET_CHANNEL, text: summary.slice(0, 3800), disable_web_page_preview: true
+      });
+    }
     if (!sent?.ok) throw new Error(`Could not publish daily summary for ${channel.username}`);
     await env.NEWS_KV.put(publicationKey, JSON.stringify({
       status: "published", date, message_id: sent.result?.message_id || null, items: items.length, published_at: new Date().toISOString()
