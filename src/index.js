@@ -382,7 +382,11 @@ async function publishScheduledPost(kind, env) {
   const failures = [];
   for (const channel of CHANNELS) {
     try {
-      posts.push(...await readRecentClubPosts(channel, env));
+      const sourcePosts = await readRecentClubPosts(channel, env);
+      if (!sourcePosts.length) {
+        throw new Error("No posts extracted from source");
+      }
+      posts.push(...sourcePosts);
     } catch (error) {
       failures.push(`${channel.username}: ${String(error)}`);
       console.error("SCHEDULED_SOURCE_ERROR", channel.username, String(error));
