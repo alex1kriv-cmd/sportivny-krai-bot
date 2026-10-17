@@ -388,7 +388,14 @@ async function publishScheduledPost(kind, env) {
       console.error("SCHEDULED_SOURCE_ERROR", channel.username, String(error));
     }
   }
-  if (!posts.length) throw new Error("No source posts could be fetched");
+  if (failures.length) {
+    // Не публикуем сводку по неполному набору команд: это может создать
+    // ложное впечатление, что расписание или итоги проверены полностью.
+    throw new Error(`Scheduled ${kind} aborted: incomplete sources: ${failures.join("; ")}`);
+  }
+  if (posts.length < CHANNELS.length) {
+    throw new Error(`Scheduled ${kind} aborted: expected posts from all ${CHANNELS.length} sources`);
+  }
 
   const text = await generateScheduledCopy(kind, posts, env);
   const skipTokens = kind === "calendar"
@@ -398,6 +405,14 @@ async function publishScheduledPost(kind, env) {
     await env.NEWS_KV.put(key, "no-confirmed-content");
     console.log("SCHEDULED_POST_SKIPPED", kind, "No confirmed content");
     return;
+  }
+
+  // Не разрешаем модели добавлять ссылки, которых не было в источниках.
+  const sourceUrls = new Set(posts.map(post => post.url));
+  const outputUrls = text.match(/https?:\/\/[^\s)\]>]+/g) || [];
+  const unverifiedUrls = outputUrls.filter(url => !sourceUrls.has(url.replace(/[.,!?]+$/, "")));
+  if (unverifiedUrls.length) {
+    throw new Error(`Scheduled ${kind} rejected: unverified links: ${unverifiedUrls.join(", ")}`);
   }
 
   const telegramResponse = await telegramApi(env, "sendMessage", {
@@ -463,7 +478,9 @@ async function monitorChannels(env) {
     }
 
     result.last_run = startedAt;
-    result.state = "completed";
+    result.state = Object.values(result.channels).some(
+      channelResult => channelResult?.state === "error"
+    ) ? "completed_with_errors" : "completed";
     await env.NEWS_KV.put("monitor:status", JSON.stringify(result));
   }
 
