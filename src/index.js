@@ -1,7 +1,8 @@
 const CHANNELS = [
   { name: "ХК «Молот»", username: "hcmolotperm" },
   { name: "БК «ПАРМА»", username: "parmabasketprm" },
-  { name: "ФК «Амкар Пермь»", username: "amkarprm" }
+  { name: "ФК «Амкар Пермь»", username: "amkarprm" },
+  { name: "ГК «Пермские медведи»", username: "permmedvedi", type: "handball" }
 ];
 
 const PREFIX = "telegram-source:";
@@ -128,7 +129,7 @@ export default {
         return new Response("OK");
       }
 
-      // Публикация
+      // Публикация вручную подготовленного черновика
       if (cb.data === "publish") {
         await tg("answerCallbackQuery", {
           callback_query_id: cb.id,
@@ -434,25 +435,35 @@ async function scanChannel(channel, env) {
       `Источник: ${post.url}\n\n` +
       post.text;
 
-    const draft = await createMonitoredDraft(sourceText, env);
+    const draft = await createMonitoredDraft(sourceText, env, channel);
 
     if (draft !== "SKIP") {
-      const sent = await sendDraft(
-        (method, data) => telegramApi(env, method, data),
-        Number(env.TELEGRAM_ADMIN_ID),
-        `${draft}\n\nИсточник: ${post.url}`,
-        undefined,
-        env,
-        post.imageUrl
-      );
+      const telegram = (method, data) => telegramApi(env, method, data);
+      const publication =
+        `${draft}\n\nИсточник: ${post.url}\n\n🤖 Автоматическая новость`;
+      const bannerUrl = getClubBannerUrl(`${channel.name}\n${sourceText}`);
+
+      let sent = await telegram("sendPhoto", {
+        chat_id: TARGET_CHANNEL,
+        photo: bannerUrl,
+        caption: publication.slice(0, 1024)
+      });
 
       if (!sent?.ok) {
-        throw new Error(`Could not send draft for ${post.url}`);
+        console.error("Automatic photo post failed; trying text:", sent);
+        sent = await telegram("sendMessage", {
+          chat_id: TARGET_CHANNEL,
+          text: publication.slice(0, 4000),
+          disable_web_page_preview: false
+        });
+      }
+
+      if (!sent?.ok) {
+        throw new Error(`Could not automatically publish ${post.url}`);
       }
 
       draftsSent++;
-
-      await env.NEWS_KV.put(processedKey, "sent");
+      await env.NEWS_KV.put(processedKey, "published");
     } else {
       await env.NEWS_KV.put(processedKey, "skipped");
     }
@@ -629,7 +640,7 @@ async function sendDraft(
     ]
   };
 
-  // Всегда используем постоянный баннер клуба, без генерации изображений.
+  // Используем постоянный баннер клуба.
   const bannerUrl = getClubBannerUrl(text);
   const result = await telegram("sendPhoto", {
     chat_id: chatId,
@@ -646,7 +657,7 @@ async function sendDraft(
     chat_id: chatId,
     text:
       "⚠️ Не удалось отправить постоянный баннер. Проверь, что файлы " +
-      "assets/molot.png, assets/parma.png и assets/amkar.png загружены в GitHub.\n\n" +
+      "assets/molot.png, assets/parma.png, assets/amkar.png и assets/medvedi.png загружены в GitHub.\n\n" +
       text.slice(0, 3500),
     ...(replyToMessageId ? { reply_to_message_id: replyToMessageId } : {})
   });
@@ -655,6 +666,10 @@ async function sendDraft(
 function getClubBannerUrl(text) {
   const value = String(text || "").toLowerCase();
   const base = "https://raw.githubusercontent.com/alex1kriv-cmd/sportivny-krai-bot/main/assets/";
+
+  if (/пермские медведи|permmedvedi|гандбол|гандболь|handball/.test(value)) {
+    return base + "medvedi.png";
+  }
 
   if (/парма|баскетбол|баскетболь|basketball/.test(value)) {
     return base + "parma.png";
@@ -671,11 +686,20 @@ function getClubBannerUrl(text) {
 // АВТОМАТИЧЕСКАЯ РЕДАКТУРА НОВОСТЕЙ
 // ============================================================
 
-async function createMonitoredDraft(sourceText, env) {
+async function createMonitoredDraft(sourceText, env, channel) {
+  const isHandball = channel?.type === "handball";
   const systemPrompt = `Ты — спортивный журналист и выпускающий редактор Telegram-канала «Спортивный край» о спорте Пермского края.
 
 ОТБОР
 Пропускай рекламу, розыгрыши, дубли и малозначительные публикации. Рассматривай важные результаты, трансферы, кадровые решения, анонсы матчей, рекорды и интересные спортивные истории. Если материал не относится к значимым спортивным новостям Пермского края, ответь ровно SKIP.
+
+${isHandball ? `СТРОГИЙ ФИЛЬТР ДЛЯ ГАНДБОЛА
+Источник — канал гандбольного клуба «Пермские медведи». Публикуй ТОЛЬКО:
+1) анонсы предстоящих матчей команды;
+2) результаты уже сыгранных матчей команды.
+Любые другие материалы, включая тренировки, интервью, поздравления, сборы, составы без анонса матча, рекламу и общие новости клуба, пропускай ответом ровно SKIP. Если из текста нельзя уверенно понять, что это анонс матча или итоговый результат матча, ответь ровно SKIP.
+Для прошедшего матча обязательно сохраняй счёт только если он есть в источнике. Для анонса сохраняй дату, время и соперника только если они есть в источнике.
+` : ""}
 
 СТИЛЬ
 Пиши живо, естественно и по-человечески, как опытный спортивный журналист. Не пересказывай пресс-релиз канцелярским языком. Начинай с главного факта. Меняй начало и структуру от публикации к публикации. Не используй штампы, пустой пафос, искусственную интригу и фразы вроде «подарили яркие эмоции», «впереди нас ждёт захватывающее противостояние», «это ещё раз доказывает».
@@ -687,7 +711,7 @@ async function createMonitoredDraft(sourceText, env) {
 Не выдумывай счёт, статистику, даты, имена, цитаты, травмы, трансферы, причины, последствия или турнирное положение. Не добавляй прогнозы и эмоции, которых нет в исходнике. Если данных мало, пиши коротко, не заполняй объём догадками.
 
 ХЭШТЕГИ
-В конце добавь ровно два тематических хэштега: клуб/команда и вид спорта. Например: #Молот #Хоккей, #Парма #Баскетбол, #АмкарПермь #Футбол. Перед хэштегами оставь пустую строку. Не добавляй #Пермь и #СпортивныйКрай.
+В конце добавь ровно два тематических хэштега: клуб/команда и вид спорта. Например: #Молот #Хоккей, #Парма #Баскетбол, #АмкарПермь #Футбол, #ПермскиеМедведи #Гандбол. Перед хэштегами оставь пустую строку. Не добавляй #Пермь и #СпортивныйКрай.
 
 Верни только готовую публикацию или SKIP. Сохраняй абзацы и переносы строк.`;
 
