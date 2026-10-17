@@ -300,6 +300,132 @@ export default {
 };
 
 // ============================================================
+// ЕЖЕНЕДЕЛЬНЫЙ КАЛЕНДАРЬ И ИТОГИ ВЫХОДНЫХ
+// ============================================================
+
+async function readRecentClubPosts(channel, env) {
+  const response = await fetch(`https://t.me/s/${channel.username}`, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 (compatible; SportivnyKraiBot/1.0)"
+    },
+    signal: AbortSignal.timeout(15000)
+  });
+  if (!response.ok) {
+    throw new Error(`Telegram HTTP ${response.status} for ${channel.username}`);
+  }
+  const html = await response.text();
+  return parseTelegramPosts(html, channel.username)
+    .sort((a, b) => b.id - a.id)
+    .slice(0, 12)
+    .map(post => ({
+      club: channel.name,
+      url: post.url,
+      date: post.date ? new Date(post.date).toISOString() : null,
+      text: post.text.slice(0, 2500)
+    }));
+}
+
+function localDateISO(date = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Yekaterinburg",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(date);
+  const part = name => parts.find(item => item.type === name)?.value;
+  return `${part("year")}-${part("month")}-${part("day")}`;
+}
+
+async function generateScheduledCopy(kind, posts, env) {
+  if (!env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY is missing");
+  const today = localDateISO();
+  const isCalendar = kind === "calendar";
+  const system = isCalendar
+    ? `Ты выпускающий редактор Telegram-канала «Спортивный край». Составь календарь матчей четырёх пермских команд на ближайшие 7 дней, начиная с ${today}: ХК «Молот», БК «ПАРМА», ФК «Амкар Пермь», ГК «Пермские медведи». Используй ТОЛЬКО подтверждённые в источниках предстоящие матчи. Не включай прошедшие матчи, тренировочные новости, слухи и неуказанные даты/время. Если время не указано, напиши «время не указано». Сгруппируй по дням, внутри дня — по клубам. У каждого матча укажи клуб, соперника, турнир (если есть), дату и время (только если указаны), ссылку на источник. Заголовок: «📅 Матчи пермских команд: ближайшая неделя». Внизу ровно два хэштега: #СпортивныйКрай #СпортПрикамья. Если подтверждённых матчей нет, верни ровно NO_CONFIRMED_MATCHES. Не додумывай и не прогнозируй.`
+    : `Ты выпускающий редактор Telegram-канала «Спортивный край». Подведи итоги прошедших выходных (суббота и воскресенье) для ХК «Молот», БК «ПАРМА», ФК «Амкар Пермь» и ГК «Пермские медведи». Используй только факты из источников: финальные результаты и счёт, если они прямо указаны. Не выдавай анонсы за результаты, не придумывай счёт, авторов голов, статистику и турнирное положение. Объедини подтверждённые результаты в одну компактную публикацию с заголовком «🏆 Итоги выходных в спорте Прикамья». У каждого результата укажи клуб, соперника и счёт только если они подтверждены, добавь ссылку на источник. Внизу ровно два хэштега: #СпортивныйКрай #СпортПрикамья. Если нет подтверждённых результатов за выходные, верни ровно NO_CONFIRMED_RESULTS.`;
+  const response = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.OPENAI_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      temperature: 0.2,
+      messages: [
+        { role: "system", content: system },
+        {
+          role: "user",
+          content: JSON.stringify({ date_in_perm: today, sources: posts })
+        }
+      ]
+    })
+  });
+  if (!response.ok) throw new Error(`OpenAI HTTP ${response.status}`);
+  const result = await response.json();
+  const text = result.choices?.[0]?.message?.content?.trim();
+  if (!text) throw new Error("OpenAI returned empty scheduled post");
+  return text;
+}
+
+async function publishScheduledPost(kind, env) {
+  if (!env.TELEGRAM_BOT_TOKEN || !env.NEWS_KV) {
+    throw new Error("Missing Telegram token or NEWS_KV");
+  }
+  const key = `scheduled-post:${kind}:${localDateISO()}`;
+  if (await env.NEWS_KV.get(key)) {
+    console.log("SCHEDULED_POST_ALREADY_HANDLED", kind, localDateISO());
+    return;
+  }
+
+  const posts = [];
+  const failures = [];
+  for (const channel of CHANNELS) {
+    try {
+      posts.push(...await readRecentClubPosts(channel, env));
+    } catch (error) {
+      failures.push(`${channel.username}: ${String(error)}`);
+      console.error("SCHEDULED_SOURCE_ERROR", channel.username, String(error));
+    }
+  }
+  if (!posts.length) throw new Error("No source posts could be fetched");
+
+  const text = await generateScheduledCopy(kind, posts, env);
+  const skipTokens = kind === "calendar"
+    ? ["NO_CONFIRMED_MATCHES"]
+    : ["NO_CONFIRMED_RESULTS"];
+  if (skipTokens.includes(text.trim())) {
+    await env.NEWS_KV.put(key, "no-confirmed-content");
+    console.log("SCHEDULED_POST_SKIPPED", kind, "No confirmed content");
+    return;
+  }
+
+  const telegramResponse = await telegramApi(env, "sendMessage", {
+    chat_id: TARGET_CHANNEL,
+    text: `${text.slice(0, 3600)}\n\n🤖 Автоматическая публикация`,
+    disable_web_page_preview: true
+  });
+  if (!telegramResponse?.ok) {
+    throw new Error(`Telegram publish failed for ${kind}`);
+  }
+  await env.NEWS_KV.put(key, JSON.stringify({
+    status: "published",
+    date: localDateISO(),
+    message_id: telegramResponse.result?.message_id || null,
+    source_failures: failures
+  }));
+  console.log("SCHEDULED_POST_PUBLISHED", kind, localDateISO());
+}
+
+async function publishWeeklyCalendar(env) {
+  return publishScheduledPost("calendar", env);
+}
+
+async function publishWeekendRecap(env) {
+  return publishScheduledPost("recap", env);
+}
+
+// ============================================================
 // МОНИТОРИНГ ИСТОЧНИКОВ
 // ============================================================
 
