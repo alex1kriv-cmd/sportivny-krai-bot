@@ -294,6 +294,7 @@ export default {
 
         await monitorChannels(env);
         await monitorOfficialBasketballResults(env);
+        await monitorOfficialTeamResults(env);
 
         if (cron === "0 17 * * *") {
           await publishDailySummaries(env);
@@ -439,6 +440,174 @@ async function monitorOfficialBasketballResults(env) {
   };
   await env.NEWS_KV.put("official-results:russiabasket:status", JSON.stringify(status));
   console.log("OFFICIAL_RUSSIABASKET_RESULTS", JSON.stringify(status));
+}
+
+// ============================================================
+// ОФИЦИАЛЬНЫЕ КАЛЕНДАРИ И РЕЗУЛЬТАТЫ ОСНОВНЫХ КОМАНД
+// Результат публикуется только при наличии явного завершённого события,
+// основного состава, обеих команд и счёта в данных официального источника.
+// ============================================================
+
+const OFFICIAL_TEAM_SOURCES = [
+  {
+    key: "molot",
+    name: "ХК «Молот»",
+    aliases: ["Молот", "Молот им. Лебедева", "HC Molot"],
+    url: "https://vhlru.ru/calendar/",
+    competition: "ВХЛ",
+    sport: "Хоккей",
+    exclude: /молод[её]ж|юнош|юниор|дубл|академ|\bмхк\b/i
+  },
+  {
+    key: "parma",
+    name: "БК «ПАРМА»",
+    aliases: ["БЕТСИТИ ПАРМА", "ПАРМА Пермский край", "ПАРМА"],
+    url: "https://parmabasket.ru/statistics/games/",
+    competition: "Баскетбол",
+    sport: "Баскетбол",
+    exclude: /молод[её]ж|дубл|\bпарма-дубл\b|\bм\s*\(/i
+  },
+  {
+    key: "amkar",
+    name: "ФК «Амкар Пермь»",
+    aliases: ["Амкар-Пермь", "Амкар Пермь", "Амкар"],
+    url: "https://fc-amkar.org/calendar/",
+    competition: "Футбол",
+    sport: "Футбол",
+    exclude: /молод[её]ж|юнош|юниор|дубл|\bамкар-?м\b|\bамкар-?2\b/i
+  },
+  {
+    key: "permmedvedi",
+    name: "ГК «Пермские медведи»",
+    aliases: ["Пермские медведи", "Пермь Медведи"],
+    url: "https://www.permmedvedi-handball.ru/",
+    competition: "Гандбол",
+    sport: "Гандбол",
+    exclude: /молод[её]ж|юнош|юниор|дубл|резерв|\bмедведи-?м\b|\bмедведи-?2\b/i
+  }
+];
+
+async function monitorOfficialTeamResults(env) {
+  const status = { last_run: new Date().toISOString(), teams: {} };
+
+  for (const team of OFFICIAL_TEAM_SOURCES) {
+    try {
+      const response = await fetch(team.url, {
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; SportivnyKraiBot/1.0)" },
+        redirect: "follow",
+        signal: AbortSignal.timeout(15000)
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const html = await response.text();
+      const events = extractStructuredSportsEvents(html, team);
+      let published = 0;
+
+      for (const event of events) {
+        if (!event.finished || !event.score || !event.opponent || !event.eventId) continue;
+        const key = `official-result:${team.key}:${event.eventId}`;
+        if (await env.NEWS_KV.get(key)) continue;
+
+        const post = [
+          `${team.key === "molot" ? "🏒" : team.key === "parma" ? "🏀" : team.key === "amkar" ? "⚽" : "🤾"} ${team.name}: результат матча`,
+          "",
+          `${team.name} — ${event.opponent}: ${event.score}`,
+          "",
+          `Турнир: ${event.competition || team.competition}`,
+          `Источник: ${event.url || team.url}`,
+          "",
+          team.key === "molot" ? "#Молот #Хоккей" :
+            team.key === "parma" ? "#Парма #Баскетбол" :
+            team.key === "amkar" ? "#АмкарПермь #Футбол" :
+            "#ПермскиеМедведи #Гандбол"
+        ].join("\n");
+
+        let sent = await telegramApi(env, "sendPhoto", {
+          chat_id: TARGET_CHANNEL,
+          photo: getClubBannerUrl(team.name),
+          caption: post.slice(0, 1024)
+        });
+        if (!sent?.ok) {
+          sent = await telegramApi(env, "sendMessage", {
+            chat_id: TARGET_CHANNEL, text: post.slice(0, 4000), disable_web_page_preview: true
+          });
+        }
+        if (!sent?.ok) throw new Error(`Telegram publish failed for event ${event.eventId}`);
+        await env.NEWS_KV.put(key, JSON.stringify({
+          status: "published", source: team.url, event_id: event.eventId,
+          score: event.score, published_at: new Date().toISOString()
+        }));
+        published++;
+      }
+
+      status.teams[team.key] = {
+        state: "ok", source: team.url, structured_events_found: events.length, published
+      };
+    } catch (error) {
+      status.teams[team.key] = { state: "error", source: team.url, error: String(error).slice(0, 250) };
+      console.error("OFFICIAL_TEAM_MONITOR_ERROR", team.key, String(error));
+    }
+  }
+
+  await env.NEWS_KV.put("official-results:all-teams:status", JSON.stringify(status));
+  console.log("OFFICIAL_TEAM_RESULTS", JSON.stringify(status));
+}
+
+function extractStructuredSportsEvents(html, team) {
+  const events = [];
+  const scripts = [...String(html).matchAll(/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)];
+  const visited = new Set();
+
+  function walk(value, path = "root", inheritedUrl = team.url) {
+    if (!value || typeof value !== "object" || visited.has(value)) return;
+    visited.add(value);
+    if (Array.isArray(value)) {
+      value.forEach((item, i) => walk(item, `${path}[${i}]`, inheritedUrl));
+      return;
+    }
+
+    const type = String(value["@type"] || value.type || "").toLowerCase();
+    const home = value.homeTeam || value.home_team || value.teamHome;
+    const away = value.awayTeam || value.away_team || value.teamAway;
+    const homeName = typeof home === "string" ? home : home?.name;
+    const awayName = typeof away === "string" ? away : away?.name;
+    const allNames = [homeName, awayName].filter(Boolean).join(" ");
+    const teamMatch = team.aliases.some(alias => allNames.toLowerCase().includes(alias.toLowerCase()));
+    const context = [value.name, value.description, value.competition?.name, value.tournament?.name].filter(Boolean).join(" ");
+    const excluded = team.exclude.test(`${allNames} ${context}`);
+    const statusText = String(value.eventStatus || value.status || value.state || "").toLowerCase();
+    const finished = /eventcompleted|finished|complete|заверш|окончен|сыгран/.test(statusText);
+    const homeScore = value.homeScore ?? value.home_score ?? value.scoreHome ?? value.homeTeamScore;
+    const awayScore = value.awayScore ?? value.away_score ?? value.scoreAway ?? value.awayTeamScore;
+    const validScore = homeScore !== undefined && awayScore !== undefined &&
+      /^\d{1,3}$/.test(String(homeScore)) && /^\d{1,3}$/.test(String(awayScore));
+    const isEvent = /sportsevent|sportingevent|match|game|event/.test(type) || (homeName && awayName);
+    if (isEvent && teamMatch && !excluded && homeName && awayName && finished && validScore) {
+      const ourHome = team.aliases.some(alias => homeName.toLowerCase().includes(alias.toLowerCase()));
+      const opponent = ourHome ? awayName : homeName;
+      const id = String(value.identifier || value["@id"] || value.url || `${value.startDate || value.date || ""}:${homeName}:${awayName}`);
+      events.push({
+        eventId: id.replace(/[^a-zA-Z0-9:_-]/g, "_").slice(0, 180),
+        finished: true,
+        opponent,
+        score: `${homeScore}:${awayScore}`,
+        competition: value.superEvent?.name || value.competition?.name || value.tournament?.name || team.competition,
+        url: typeof value.url === "string" ? new URL(value.url, inheritedUrl).href : inheritedUrl
+      });
+    }
+
+    for (const [key, child] of Object.entries(value)) {
+      if (child && typeof child === "object") {
+        const childUrl = key === "url" && typeof child === "string" ? child : inheritedUrl;
+        walk(child, `${path}.${key}`, childUrl);
+      }
+    }
+  }
+
+  for (const match of scripts) {
+    try { walk(JSON.parse(match[1])); }
+    catch (error) { console.log("OFFICIAL_EVENT_JSONLD_PARSE_ERROR", team.key, String(error).slice(0, 100)); }
+  }
+  return [...new Map(events.map(event => [event.eventId, event])).values()];
 }
 
 // ============================================================
