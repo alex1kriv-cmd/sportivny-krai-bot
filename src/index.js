@@ -464,7 +464,7 @@ const OFFICIAL_TEAM_SOURCES = [
     key: "amkar",
     name: "ФК «Амкар Пермь»",
     aliases: ["Амкар-Пермь", "Амкар Пермь", "Амкар"],
-    url: "https://fc-amkar.org/calendar/",
+    url: "https://amkar-perm.ru/",
     competition: "Футбол",
     sport: "Футбол",
     exclude: /молод[её]ж|юнош|юниор|дубл|\bамкар-?м\b|\bамкар-?2\b/i
