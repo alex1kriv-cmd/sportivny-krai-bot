@@ -47,6 +47,8 @@ export default {
       return Response.json({
         ok: true,
         cron_status: await env.NEWS_KV.get("monitor:status", "json"),
+        official_results_status: await env.NEWS_KV.get("official-results:all-teams:status", "json"),
+        official_parma_status: await env.NEWS_KV.get("official-results:russiabasket:status", "json"),
         checked_channels: CHANNELS.map(c => c.username)
       });
     }
@@ -491,6 +493,12 @@ async function monitorOfficialTeamResults(env) {
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const html = await response.text();
       const events = extractStructuredSportsEvents(html, team);
+      const diagnostics = {
+        json_ld_blocks: [...html.matchAll(/<script\\b[^>]*type=["']application\\/ld\\+json["'][^>]*>/gi)].length,
+        team_mentions: team.aliases.reduce((count, alias) => count + (html.toLowerCase().split(alias.toLowerCase()).length - 1), 0),
+        score_patterns: (html.match(/\\b\\d{1,3}\\s*[-:–]\\s*\\d{1,3}\\b/g) || []).length,
+        finished_markers: (html.match(/заверш[её]н|матч окончен|eventcompleted|finished/gi) || []).length
+      };
       let published = 0;
 
       for (const event of events) {
@@ -531,7 +539,7 @@ async function monitorOfficialTeamResults(env) {
       }
 
       status.teams[team.key] = {
-        state: "ok", source: team.url, structured_events_found: events.length, published
+        state: "ok", source: team.url, structured_events_found: events.length, published, diagnostics
       };
     } catch (error) {
       status.teams[team.key] = { state: "error", source: team.url, error: String(error).slice(0, 250) };
