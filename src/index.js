@@ -294,13 +294,18 @@ export default {
           return;
         }
 
-        if (cron === "0 13 * * 4") {
+        if (cron === "0 13 * * 2,4") {
+          // One shared trigger handles both Tuesday and Thursday to stay
+          // within Cloudflare Workers Free's five-cron-trigger account limit.
+          const weekday = new Intl.DateTimeFormat("en-US", {
+            timeZone: "Asia/Yekaterinburg",
+            weekday: "short"
+          }).format(new Date());
           await publishWeeklyCalendar(env);
+          if (weekday === "Tue") await publishStandings(env);
         } else if (cron === "0 4 * * 1") {
           await publishWeekendRecap(env);
           return;
-        } else if (cron === "0 13 * * 2") {
-          await publishStandings(env);
         }
 
         await monitorChannels(env);
