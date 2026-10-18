@@ -285,6 +285,15 @@ export default {
 
     ctx.waitUntil((async () => {
       try {
+        // Official results are checked every half-hour, independently of
+        // daytime Telegram news scans, including overnight. This avoids
+        // increasing Telegram/KV news-processing work at night.
+        if (cron === "30 * * * *") {
+          await monitorOfficialBasketballResults(env);
+          await monitorOfficialTeamResults(env);
+          return;
+        }
+
         if (cron === "0 13 * * 4") {
           await publishWeeklyCalendar(env);
         } else if (cron === "0 4 * * 1") {
