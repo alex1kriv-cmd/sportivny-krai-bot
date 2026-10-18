@@ -285,7 +285,7 @@ export default {
 
     ctx.waitUntil((async () => {
       try {
-        // Official results are checked every half-hour, independently of
+        // Official results are checked hourly, independently of
         // daytime Telegram news scans, including overnight. This avoids
         // increasing Telegram/KV news-processing work at night.
         if (cron === "30 * * * *") {
