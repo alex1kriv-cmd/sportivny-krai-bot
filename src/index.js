@@ -459,15 +459,6 @@ const OFFICIAL_TEAM_SOURCES = [
     exclude: /молод[её]ж|юнош|юниор|дубл|академ|\bмхк\b/i
   },
   {
-    key: "parma",
-    name: "БК «ПАРМА»",
-    aliases: ["БЕТСИТИ ПАРМА", "ПАРМА Пермский край", "ПАРМА"],
-    url: "https://parmabasket.ru/statistics/games/",
-    competition: "Баскетбол",
-    sport: "Баскетбол",
-    exclude: /молод[её]ж|дубл|\bпарма-дубл\b|\bм\s*\(/i
-  },
-  {
     key: "amkar",
     name: "ФК «Амкар Пермь»",
     aliases: ["Амкар-Пермь", "Амкар Пермь", "Амкар"],
