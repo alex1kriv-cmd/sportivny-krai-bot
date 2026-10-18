@@ -285,24 +285,19 @@ export default {
       try {
         if (cron === "0 13 * * 4") {
           await publishWeeklyCalendar(env);
-          return;
-        }
-        if (cron === "0 4 * * 1") {
+        } else if (cron === "0 4 * * 1") {
           await publishWeekendRecap(env);
           return;
-        }
-        if (cron === "0 13 * * 2") {
+        } else if (cron === "0 13 * * 2") {
           await publishStandings(env);
-          return;
         }
-        if (cron === "0 17 * * *") {
-          await monitorChannels(env);
-          await monitorOfficialBasketballResults(env);
-          await publishDailySummaries(env);
-          return;
-        }
+
         await monitorChannels(env);
         await monitorOfficialBasketballResults(env);
+
+        if (cron === "0 17 * * *") {
+          await publishDailySummaries(env);
+        }
       } catch (error) {
         console.error("CRON_FATAL", cron, String(error));
         if (env.NEWS_KV) {
