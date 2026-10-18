@@ -296,6 +296,8 @@ export default {
           return;
         }
         if (cron === "0 17 * * *") {
+          await monitorChannels(env);
+          await monitorOfficialBasketballResults(env);
           await publishDailySummaries(env);
           return;
         }
@@ -667,8 +669,6 @@ async function monitorChannels(env) {
     channels: {}
   };
 
-  await env.NEWS_KV.put("monitor:status", JSON.stringify(result));
-
   for (const channel of CHANNELS) {
     console.log("CRON_CHECK_CHANNEL", channel.username);
 
@@ -682,13 +682,13 @@ async function monitorChannels(env) {
       };
     }
 
-    result.last_run = startedAt;
-    result.state = Object.values(result.channels).some(
-      channelResult => channelResult?.state === "error"
-    ) ? "completed_with_errors" : "completed";
-    await env.NEWS_KV.put("monitor:status", JSON.stringify(result));
   }
 
+  result.last_run = startedAt;
+  result.state = Object.values(result.channels).some(
+    channelResult => channelResult?.state === "error"
+  ) ? "completed_with_errors" : "completed";
+  await env.NEWS_KV.put("monitor:status", JSON.stringify(result));
   console.log("CRON_FINISHED", JSON.stringify(result));
 }
 
@@ -722,6 +722,24 @@ async function scanChannel(channel, env) {
       continue;
     }
     const sourceText = `${channel.name}\nИсточник: ${post.url}\n\n${post.text}`;
+
+    // Match results must come from official league/federation resources,
+    // not from Telegram reposts. Preserve the source as processed to avoid
+    // re-checking it on every scan.
+    if (isMatchResultPost(post.text)) {
+      await env.NEWS_KV.put(processedKey, "skipped:result-requires-official-source");
+      highestProcessed = Math.max(highestProcessed, post.id);
+      continue;
+    }
+
+    // Youth/reserve handball posts must never be mistaken for the senior team.
+    // If the post explicitly mentions a youth/reserve side, do not publish it.
+    if (channel.type === "handball" && isYouthOrReservePost(post.text)) {
+      await env.NEWS_KV.put(processedKey, "skipped:youth-or-reserve-team");
+      highestProcessed = Math.max(highestProcessed, post.id);
+      continue;
+    }
+
     const category = await classifyMonitoredPost(sourceText, env, channel);
     if (category === "URGENT" || category === "MATCH_ANNOUNCEMENT") {
       const draft = await createMonitoredDraft(sourceText, env, channel);
@@ -757,6 +775,16 @@ async function scanChannel(channel, env) {
   const result = { state: "ok", posts_found: posts.length, new_posts: newPosts.length, published, queued };
   console.log("CRON_CHANNEL_DONE", channel.username, result);
   return result;
+}
+
+function isMatchResultPost(text) {
+  const value = String(text || "").toLowerCase();
+  return /(?:итог(?:и)? матча|результат матча|матч заверш[её]н|финальн(?:ый|ого) свисток|победил[аи]?|одержал[аи]? победу|проиграл[аи]?|сыграли вничью|\b\d{1,3}\s*[:–—-]\s*\d{1,3}\b)/i.test(value);
+}
+
+function isYouthOrReservePost(text) {
+  const value = String(text || "").toLowerCase();
+  return /молод[её]жн|молод[её]жка|дубл[ьи]|резервн(?:ая|ой|ую) команд|\bм\b\s*(?:\(|—|-)|\b-2\b|высшая лига.*дубл|юношеск|юниорск/i.test(value);
 }
 
 async function classifyMonitoredPost(sourceText, env, channel) {
