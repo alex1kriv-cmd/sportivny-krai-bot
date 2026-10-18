@@ -494,9 +494,9 @@ async function monitorOfficialTeamResults(env) {
       const html = await response.text();
       const events = extractStructuredSportsEvents(html, team);
       const diagnostics = {
-        json_ld_blocks: [...html.matchAll(/<script\\b[^>]*type=["']application\\/ld\\+json["'][^>]*>/gi)].length,
+        json_ld_blocks: [...html.matchAll(/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>/gi)].length,
         team_mentions: team.aliases.reduce((count, alias) => count + (html.toLowerCase().split(alias.toLowerCase()).length - 1), 0),
-        score_patterns: (html.match(/\\b\\d{1,3}\\s*[-:–]\\s*\\d{1,3}\\b/g) || []).length,
+        score_patterns: (html.match(/\b\d{1,3}\s*[-:–]\s*\d{1,3}\b/g) || []).length,
         finished_markers: (html.match(/заверш[её]н|матч окончен|eventcompleted|finished/gi) || []).length
       };
       let published = 0;
