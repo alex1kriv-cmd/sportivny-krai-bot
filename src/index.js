@@ -47,6 +47,8 @@ export default {
       return Response.json({
         ok: true,
         cron_status: await env.NEWS_KV.get("monitor:status", "json"),
+        official_results_status: await env.NEWS_KV.get("official-results:all-teams:status", "json"),
+        official_parma_status: await env.NEWS_KV.get("official-results:russiabasket:status", "json"),
         checked_channels: CHANNELS.map(c => c.username)
       });
     }
@@ -285,22 +287,20 @@ export default {
       try {
         if (cron === "0 13 * * 4") {
           await publishWeeklyCalendar(env);
-          return;
-        }
-        if (cron === "0 4 * * 1") {
+        } else if (cron === "0 4 * * 1") {
           await publishWeekendRecap(env);
           return;
-        }
-        if (cron === "0 13 * * 2") {
+        } else if (cron === "0 13 * * 2") {
           await publishStandings(env);
-          return;
         }
-        if (cron === "0 17 * * *") {
-          await publishDailySummaries(env);
-          return;
-        }
+
         await monitorChannels(env);
         await monitorOfficialBasketballResults(env);
+        await monitorOfficialTeamResults(env);
+
+        if (cron === "0 17 * * *") {
+          await publishDailySummaries(env);
+        }
       } catch (error) {
         console.error("CRON_FATAL", cron, String(error));
         if (env.NEWS_KV) {
@@ -442,6 +442,173 @@ async function monitorOfficialBasketballResults(env) {
   };
   await env.NEWS_KV.put("official-results:russiabasket:status", JSON.stringify(status));
   console.log("OFFICIAL_RUSSIABASKET_RESULTS", JSON.stringify(status));
+}
+
+// ============================================================
+// ОФИЦИАЛЬНЫЕ КАЛЕНДАРИ И РЕЗУЛЬТАТЫ ОСНОВНЫХ КОМАНД
+// Результат публикуется только при наличии явного завершённого события,
+// основного состава, обеих команд и счёта в данных официального источника.
+// ============================================================
+
+const OFFICIAL_TEAM_SOURCES = [
+  {
+    key: "molot",
+    name: "ХК «Молот»",
+    aliases: ["Молот", "Молот им. Лебедева", "HC Molot"],
+    url: "https://vhlru.ru/calendar/",
+    competition: "ВХЛ",
+    sport: "Хоккей",
+    exclude: /молод[её]ж|юнош|юниор|дубл|академ|\bмхк\b/i
+  },
+  {
+    key: "amkar",
+    name: "ФК «Амкар Пермь»",
+    aliases: ["Амкар-Пермь", "Амкар Пермь", "Амкар"],
+    url: "https://fc-amkar.org/calendar/",
+    competition: "Футбол",
+    sport: "Футбол",
+    exclude: /молод[её]ж|юнош|юниор|дубл|\bамкар-?м\b|\bамкар-?2\b/i
+  },
+  {
+    key: "permmedvedi",
+    name: "ГК «Пермские медведи»",
+    aliases: ["Пермские медведи", "Пермь Медведи"],
+    url: "https://www.permmedvedi-handball.ru/",
+    competition: "Гандбол",
+    sport: "Гандбол",
+    exclude: /молод[её]ж|юнош|юниор|дубл|резерв|\bмедведи-?м\b|\bмедведи-?2\b/i
+  }
+];
+
+async function monitorOfficialTeamResults(env) {
+  const status = { last_run: new Date().toISOString(), teams: {} };
+
+  for (const team of OFFICIAL_TEAM_SOURCES) {
+    try {
+      const response = await fetch(team.url, {
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; SportivnyKraiBot/1.0)" },
+        redirect: "follow",
+        signal: AbortSignal.timeout(15000)
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const html = await response.text();
+      const events = extractStructuredSportsEvents(html, team);
+      const diagnostics = {
+        json_ld_blocks: [...html.matchAll(/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>/gi)].length,
+        team_mentions: team.aliases.reduce((count, alias) => count + (html.toLowerCase().split(alias.toLowerCase()).length - 1), 0),
+        score_patterns: (html.match(/\b\d{1,3}\s*[-:–]\s*\d{1,3}\b/g) || []).length,
+        finished_markers: (html.match(/заверш[её]н|матч окончен|eventcompleted|finished/gi) || []).length
+      };
+      let published = 0;
+
+      for (const event of events) {
+        if (!event.finished || !event.score || !event.opponent || !event.eventId) continue;
+        const key = `official-result:${team.key}:${event.eventId}`;
+        if (await env.NEWS_KV.get(key)) continue;
+
+        const post = [
+          `${team.key === "molot" ? "🏒" : team.key === "parma" ? "🏀" : team.key === "amkar" ? "⚽" : "🤾"} ${team.name}: результат матча`,
+          "",
+          `${team.name} — ${event.opponent}: ${event.score}`,
+          "",
+          `Турнир: ${event.competition || team.competition}`,
+          `Источник: ${event.url || team.url}`,
+          "",
+          team.key === "molot" ? "#Молот #Хоккей" :
+            team.key === "parma" ? "#Парма #Баскетбол" :
+            team.key === "amkar" ? "#АмкарПермь #Футбол" :
+            "#ПермскиеМедведи #Гандбол"
+        ].join("\n");
+
+        let sent = await telegramApi(env, "sendPhoto", {
+          chat_id: TARGET_CHANNEL,
+          photo: getClubBannerUrl(team.name),
+          caption: post.slice(0, 1024)
+        });
+        if (!sent?.ok) {
+          sent = await telegramApi(env, "sendMessage", {
+            chat_id: TARGET_CHANNEL, text: post.slice(0, 4000), disable_web_page_preview: true
+          });
+        }
+        if (!sent?.ok) throw new Error(`Telegram publish failed for event ${event.eventId}`);
+        await env.NEWS_KV.put(key, JSON.stringify({
+          status: "published", source: team.url, event_id: event.eventId,
+          score: event.score, published_at: new Date().toISOString()
+        }));
+        published++;
+      }
+
+      status.teams[team.key] = {
+        state: "ok", source: team.url, structured_events_found: events.length, published, diagnostics
+      };
+    } catch (error) {
+      status.teams[team.key] = { state: "error", source: team.url, error: String(error).slice(0, 250) };
+      console.error("OFFICIAL_TEAM_MONITOR_ERROR", team.key, String(error));
+    }
+  }
+
+  await env.NEWS_KV.put("official-results:all-teams:status", JSON.stringify(status));
+  console.log("OFFICIAL_TEAM_RESULTS", JSON.stringify(status));
+}
+
+function extractStructuredSportsEvents(html, team) {
+  const events = [];
+  const scripts = [...String(html).matchAll(/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)];
+  const visited = new Set();
+
+  function walk(value, path = "root", inheritedUrl = team.url) {
+    if (!value || typeof value !== "object" || visited.has(value)) return;
+    visited.add(value);
+    if (Array.isArray(value)) {
+      value.forEach((item, i) => walk(item, `${path}[${i}]`, inheritedUrl));
+      return;
+    }
+
+    const type = String(value["@type"] || value.type || "").toLowerCase();
+    const home = value.homeTeam || value.home_team || value.teamHome;
+    const away = value.awayTeam || value.away_team || value.teamAway;
+    const homeName = typeof home === "string" ? home : home?.name;
+    const awayName = typeof away === "string" ? away : away?.name;
+    const allNames = [homeName, awayName].filter(Boolean).join(" ");
+    const teamMatch = team.aliases.some(alias => allNames.toLowerCase().includes(alias.toLowerCase()));
+    const context = [value.name, value.description, value.competition?.name, value.tournament?.name].filter(Boolean).join(" ");
+    const excluded = team.exclude.test(`${allNames} ${context}`);
+    const statusText = String(value.eventStatus || value.status || value.state || "").toLowerCase();
+    const finished = /eventcompleted|finished|complete|заверш|окончен|сыгран/.test(statusText);
+    const homeScore = value.homeScore ?? value.home_score ?? value.scoreHome ?? value.homeTeamScore;
+    const awayScore = value.awayScore ?? value.away_score ?? value.scoreAway ?? value.awayTeamScore;
+    const validScore = homeScore !== undefined && awayScore !== undefined &&
+      /^\d{1,3}$/.test(String(homeScore)) && /^\d{1,3}$/.test(String(awayScore));
+    const isEvent = /sportsevent|sportingevent|match|game|event/.test(type) || (homeName && awayName);
+    if (isEvent && teamMatch && !excluded && homeName && awayName && finished && validScore) {
+      const ourHome = team.aliases.some(alias => homeName.toLowerCase().includes(alias.toLowerCase()));
+      const opponent = ourHome ? awayName : homeName;
+      const ourScore = ourHome ? homeScore : awayScore;
+      const opponentScore = ourHome ? awayScore : homeScore;
+      const id = String(value.identifier || value["@id"] || value.url || `${value.startDate || value.date || ""}:${homeName}:${awayName}`);
+      events.push({
+        eventId: id.replace(/[^a-zA-Z0-9:_-]/g, "_").slice(0, 180),
+        finished: true,
+        opponent,
+        score: `${ourScore}:${opponentScore}`,
+        competition: value.superEvent?.name || value.competition?.name || value.tournament?.name || team.competition,
+        url: typeof value.url === "string" ? new URL(value.url, inheritedUrl).href : inheritedUrl
+      });
+    }
+
+    for (const [key, child] of Object.entries(value)) {
+      if (child && typeof child === "object") {
+        const childUrl = key === "url" && typeof child === "string" ? child : inheritedUrl;
+        walk(child, `${path}.${key}`, childUrl);
+      }
+    }
+  }
+
+  for (const match of scripts) {
+    try { walk(JSON.parse(match[1])); }
+    catch (error) { console.log("OFFICIAL_EVENT_JSONLD_PARSE_ERROR", team.key, String(error).slice(0, 100)); }
+  }
+  return [...new Map(events.map(event => [event.eventId, event])).values()];
 }
 
 // ============================================================
@@ -667,8 +834,6 @@ async function monitorChannels(env) {
     channels: {}
   };
 
-  await env.NEWS_KV.put("monitor:status", JSON.stringify(result));
-
   for (const channel of CHANNELS) {
     console.log("CRON_CHECK_CHANNEL", channel.username);
 
@@ -682,13 +847,13 @@ async function monitorChannels(env) {
       };
     }
 
-    result.last_run = startedAt;
-    result.state = Object.values(result.channels).some(
-      channelResult => channelResult?.state === "error"
-    ) ? "completed_with_errors" : "completed";
-    await env.NEWS_KV.put("monitor:status", JSON.stringify(result));
   }
 
+  result.last_run = startedAt;
+  result.state = Object.values(result.channels).some(
+    channelResult => channelResult?.state === "error"
+  ) ? "completed_with_errors" : "completed";
+  await env.NEWS_KV.put("monitor:status", JSON.stringify(result));
   console.log("CRON_FINISHED", JSON.stringify(result));
 }
 
@@ -722,6 +887,24 @@ async function scanChannel(channel, env) {
       continue;
     }
     const sourceText = `${channel.name}\nИсточник: ${post.url}\n\n${post.text}`;
+
+    // Match results must come from official league/federation resources,
+    // not from Telegram reposts. Preserve the source as processed to avoid
+    // re-checking it on every scan.
+    if (isMatchResultPost(post.text)) {
+      await env.NEWS_KV.put(processedKey, "skipped:result-requires-official-source");
+      highestProcessed = Math.max(highestProcessed, post.id);
+      continue;
+    }
+
+    // Youth/reserve handball posts must never be mistaken for the senior team.
+    // If the post explicitly mentions a youth/reserve side, do not publish it.
+    if (channel.type === "handball" && isYouthOrReservePost(post.text)) {
+      await env.NEWS_KV.put(processedKey, "skipped:youth-or-reserve-team");
+      highestProcessed = Math.max(highestProcessed, post.id);
+      continue;
+    }
+
     const category = await classifyMonitoredPost(sourceText, env, channel);
     if (category === "URGENT" || category === "MATCH_ANNOUNCEMENT") {
       const draft = await createMonitoredDraft(sourceText, env, channel);
@@ -757,6 +940,16 @@ async function scanChannel(channel, env) {
   const result = { state: "ok", posts_found: posts.length, new_posts: newPosts.length, published, queued };
   console.log("CRON_CHANNEL_DONE", channel.username, result);
   return result;
+}
+
+function isMatchResultPost(text) {
+  const value = String(text || "").toLowerCase();
+  return /(?:итог(?:и)? матча|результат матча|матч заверш[её]н|финальн(?:ый|ого) свисток|победил[аи]?|одержал[аи]? победу|проиграл[аи]?|сыграли вничью|\b\d{1,3}\s*[:–—-]\s*\d{1,3}\b)/i.test(value);
+}
+
+function isYouthOrReservePost(text) {
+  const value = String(text || "").toLowerCase();
+  return /молод[её]жн|молод[её]жка|дубл[ьи]|резервн(?:ая|ой|ую) команд|\bм\b\s*(?:\(|—|-)|\b-2\b|высшая лига.*дубл|юношеск|юниорск/i.test(value);
 }
 
 async function classifyMonitoredPost(sourceText, env, channel) {
