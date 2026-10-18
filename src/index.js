@@ -583,12 +583,14 @@ function extractStructuredSportsEvents(html, team) {
     if (isEvent && teamMatch && !excluded && homeName && awayName && finished && validScore) {
       const ourHome = team.aliases.some(alias => homeName.toLowerCase().includes(alias.toLowerCase()));
       const opponent = ourHome ? awayName : homeName;
+      const ourScore = ourHome ? homeScore : awayScore;
+      const opponentScore = ourHome ? awayScore : homeScore;
       const id = String(value.identifier || value["@id"] || value.url || `${value.startDate || value.date || ""}:${homeName}:${awayName}`);
       events.push({
         eventId: id.replace(/[^a-zA-Z0-9:_-]/g, "_").slice(0, 180),
         finished: true,
         opponent,
-        score: `${homeScore}:${awayScore}`,
+        score: `${ourScore}:${opponentScore}`,
         competition: value.superEvent?.name || value.competition?.name || value.tournament?.name || team.competition,
         url: typeof value.url === "string" ? new URL(value.url, inheritedUrl).href : inheritedUrl
       });
