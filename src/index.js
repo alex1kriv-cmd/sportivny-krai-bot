@@ -295,13 +295,11 @@ export default {
         }
 
         if (cron === "0 13 * * 2,4") {
-          // One shared trigger handles both Tuesday and Thursday to stay
-          // within Cloudflare Workers Free's five-cron-trigger account limit.
           const weekday = new Intl.DateTimeFormat("en-US", {
             timeZone: "Asia/Yekaterinburg",
             weekday: "short"
           }).format(new Date());
-          await publishWeeklyCalendar(env);
+          if (weekday === "Thu") await publishWeeklyCalendar(env);
           if (weekday === "Tue") await publishStandings(env);
         } else if (cron === "0 4 * * 1") {
           await publishWeekendRecap(env);
@@ -312,7 +310,12 @@ export default {
         await monitorOfficialBasketballResults(env);
         await monitorOfficialTeamResults(env);
 
-        if (cron === "0 17 * * *") {
+        // The 15-minute cron also handles the 22:00 Perm daily digest.
+        // The per-club publication keys prevent duplicate summaries in that hour.
+        const permHour = Number(new Intl.DateTimeFormat("en-GB", {
+          timeZone: "Asia/Yekaterinburg", hour: "2-digit", hourCycle: "h23"
+        }).format(new Date()));
+        if (permHour === 22) {
           await publishDailySummaries(env);
         }
       } catch (error) {
@@ -901,23 +904,6 @@ async function scanChannel(channel, env) {
       continue;
     }
     const sourceText = `${channel.name}\nИсточник: ${post.url}\n\n${post.text}`;
-
-    // Match results must come from official league/federation resources,
-    // not from Telegram reposts. Preserve the source as processed to avoid
-    // re-checking it on every scan.
-    if (isMatchResultPost(post.text)) {
-      await env.NEWS_KV.put(processedKey, "skipped:result-requires-official-source");
-      highestProcessed = Math.max(highestProcessed, post.id);
-      continue;
-    }
-
-    // Youth/reserve handball posts must never be mistaken for the senior team.
-    // If the post explicitly mentions a youth/reserve side, do not publish it.
-    if (channel.type === "handball" && isYouthOrReservePost(post.text)) {
-      await env.NEWS_KV.put(processedKey, "skipped:youth-or-reserve-team");
-      highestProcessed = Math.max(highestProcessed, post.id);
-      continue;
-    }
 
     const category = await classifyMonitoredPost(sourceText, env, channel);
     if (category === "URGENT" || category === "MATCH_ANNOUNCEMENT") {
