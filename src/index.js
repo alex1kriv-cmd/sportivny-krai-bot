@@ -1214,19 +1214,20 @@ function getClubBannerUrl(text) {
   const base =
     "https://raw.githubusercontent.com/alex1kriv-cmd/sportivny-krai-bot/main/assets/";
 
+  // Versioned asset names avoid Telegram's cached previews/photos of old banners.
   if (/пермские медведи|permmedvedi|гандбол|гандболь|handball/.test(value)) {
-    return base + "medvedi.png";
+    return base + "medvedi-v2.png";
   }
 
   if (/парма|баскетбол|баскетболь|basketball/.test(value)) {
-    return base + "parma.png";
+    return base + "parma-v2.png";
   }
 
   if (/амкар|футбол|футболь|soccer|football/.test(value)) {
-    return base + "amkar.png";
+    return base + "amkar-v2.png";
   }
 
-  return base + "molot.png";
+  return base + "molot-v3.png";
 }
 
 // ============================================================
