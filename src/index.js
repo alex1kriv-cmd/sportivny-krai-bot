@@ -1227,7 +1227,7 @@ function getClubBannerUrl(text) {
     return base + "amkar.png";
   }
 
-  return base + "molot.png";
+  return base + "molot-v3.png";
 }
 
 // ============================================================
