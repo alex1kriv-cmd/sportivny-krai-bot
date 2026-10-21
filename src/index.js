@@ -1214,7 +1214,7 @@ function getClubBannerUrl(text) {
   const base =
     "https://raw.githubusercontent.com/alex1kriv-cmd/sportivny-krai-bot/main/assets/";
 
-  // Versioned asset names avoid Telegram's cached previews/photos of old banners.
+  // Keep club-specific asset filenames versioned where available to avoid Telegram caching an older banner.
   if (/пермские медведи|permmedvedi|гандбол|гандболь|handball/.test(value)) {
     return base + "medvedi.png";
   }
