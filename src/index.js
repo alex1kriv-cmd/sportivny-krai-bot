@@ -1224,7 +1224,7 @@ function getClubBannerUrl(text) {
   }
 
   if (/амкар|футбол|футболь|soccer|football/.test(value)) {
-    return base + "amkar.png";
+    return base + "amkar-v3.png";
   }
 
   return base + "molot-v3.png";
