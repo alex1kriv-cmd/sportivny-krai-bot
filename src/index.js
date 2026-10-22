@@ -1227,7 +1227,9 @@ function getClubBannerUrl(text) {
     return base + "amkar-v3.png";
   }
 
-  return base + "molot-v3.png";
+  // Telegram rejects very wide photos (Molot source banner is 6762x284, ratio > 20:1).
+  // Resize through images.weserv.nl to keep the original banner artwork while making it Telegram-compatible.
+  return "https://images.weserv.nl/?url=raw.githubusercontent.com%2Falex1kriv-cmd%2Fsportivny-krai-bot%2Fmain%2Fassets%2Fmolot-v3.png&w=5600";
 }
 
 // ============================================================
